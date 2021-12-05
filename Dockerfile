@@ -1,14 +1,25 @@
 FROM ubuntu:20.04
-RUN apt-get update
-RUN apt-get install -y vim
-RUN apt-get install -y wget
-RUN apt-get install -y rustc
-RUN apt-get install -y cargo
-RUN apt-get install -y git
-RUN mkdir src
-RUN cd src && git clone https://github.com/lskatz/fasten
-RUN cd src/fasten && cargo build --release 
-RUN echo hello
-RUN rustc --version
+ENV TZ=Europe/Berlin
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+RUN apt-get update ; \
+	apt-get install -y vim wget rustc cargo git cmake sudo
+
+RUN useradd --create-home --shell /bin/bash --groups sudo appuser; \
+    echo "appuser:1" | chpasswd
+
+USER appuser
+
+RUN mkdir /home/appuser/src ; \
+    cd /home/appuser/src ; \ 
+    git clone https://github.com/lskatz/fasten; \
+    cd fasten && cargo build --release 
+
+RUN cd /home/appuser/src; \
+	git clone https://github.com/rust-bio/rust-htslib.git; \
+	cd rust-htslib 
+
+RUN echo 'export PATH="$PATH:/home/appuser/src/fasten/target/release/"' >> /home/appuser/.bashrc
+	
+WORKDIR /home/appuser
 CMD ["/bin/bash"]
 ENTRYPOINT bash
