@@ -17,6 +17,9 @@ RUN mkdir /home/appuser/src ; \
 RUN cd /home/appuser/src; \
 	git clone https://github.com/rust-bio/rust-htslib.git; \
 	cd rust-htslib 
+RUN cd /home/appuser/src; \
+	git clone https://github.com/tzeitim/rogtk.git ;\
+	cd rogtk
 
 RUN echo 'export PATH="$PATH:/home/appuser/src/fasten/target/release/"' >> /home/appuser/.bashrc
 	
