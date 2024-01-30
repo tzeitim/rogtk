@@ -7,24 +7,45 @@ use std::io::{self, BufRead};
 
 use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_to_parquet_schema;
 use parquet::arrow::ArrowWriter;
-use arrow::array::{Array, StringArray};
+use arrow::array::StringArray;
 use parquet::file::properties::WriterProperties;
 use parquet::basic::Compression;
 
 use arrow::datatypes::{Schema, Field, DataType};
-use parquet::file::writer::SerializedFileWriter;
 
 //extern crate fasten;
 /*use seal::pair::{
     Alignment, AlignmentSet, InMemoryAlignmentMatrix, NeedlemanWunsch, SmithWaterman, Step,Strategy,
 };
 */
+fn reverse_complement(dna: &str) -> String {
+    dna.chars()
+        .map(|c| match c {
+            'A' => 'T',
+            'T' => 'A',
+            'C' => 'G',
+            'G' => 'C',
+            'N' => 'N',
+            _ => c, // Handle non-DNA characters or add error handling
+        })
+        .rev()
+        .collect::<String>()
+}
 
 #[pyfunction]
-fn process_files(in_fn1: String, in_fn2: String, cbc_len: usize, umi_len: usize, limit: Option<usize>)
-    -> PyResult<Vec<(String, String, String, String)>> {
+fn process_files(
+       in_fn1: String,
+       in_fn2: String,
+       cbc_len: usize,
+       umi_len: usize,
+       out_fn: String,
+       limit: Option<usize>,
+       do_rev_comp: Option<bool>)
+    -> PyResult<()> {
+
+    let do_rev_comp = do_rev_comp.unwrap_or(false);
+
     let gz_file1 = File::open(in_fn1)?;
     let gz_file2 = File::open(in_fn2)?;
 
@@ -36,16 +57,19 @@ fn process_files(in_fn1: String, in_fn2: String, cbc_len: usize, umi_len: usize,
 
     // Define schema
     let arrow_schema = Arc::new(Schema::new(vec![
+        Field::new("read_id", DataType::Utf8, false),
+        Field::new("start", DataType::Utf8, false),
+        Field::new("end", DataType::Utf8, false),
         Field::new("cbc_str", DataType::Utf8, false),
         Field::new("umi_str", DataType::Utf8, false),
         Field::new("cbc_qual", DataType::Utf8, false),
         Field::new("umi_qual", DataType::Utf8, false),
+        Field::new("read2_seq", DataType::Utf8, false),
+        Field::new("read2_qual", DataType::Utf8, false),
     ]));
 
-    let parquet_schema = arrow_to_parquet_schema(&arrow_schema).unwrap();
-
     // Initialize Parquet writer
-    let file = File::create("output.parquet")?;
+    let file = File::create(out_fn)?;
     // WriterProperties can be used to set Parquet file options
     let props = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
@@ -71,46 +95,75 @@ fn process_files(in_fn1: String, in_fn2: String, cbc_len: usize, umi_len: usize,
         None => Box::new(reader2),
     };
 
-    let mut cbc_str_buffer = Vec::new(); // Buffer to accumulate record batches
-    let mut cbc_qual_buffer = Vec::new(); // Buffer to accumulate record batches
-    let mut umi_str_buffer = Vec::new(); // Buffer to accumulate record batches
-    let mut umi_qual_buffer = Vec::new(); // Buffer to accumulate record batches
-                                          //
-    let mut chunk_count = 0; // Counter for chunks
-                             //
-    let mut results = Vec::new();
+    let mut read_id_buffer = Vec::new(); 
+    let mut start_buffer = Vec::new(); 
+    let mut end_buffer = Vec::new();
+    let mut cbc_str_buffer = Vec::new(); 
+    let mut cbc_qual_buffer = Vec::new();
+    let mut umi_str_buffer = Vec::new(); 
+    let mut umi_qual_buffer = Vec::new();
+    let mut read2_seq_buffer= Vec::new();
+    let mut read2_qual_buffer = Vec::new();
+
+    let mut chunk_count = 0; 
+                             
     for (chunk1, chunk2) in iter1.chunks(4).into_iter().zip(iter2.chunks(4).into_iter()) {
         let chunk1: Vec<_> = chunk1.collect();
         let chunk2: Vec<_> = chunk2.collect();
 
         let (read_id1, seq1, _plus1, qual1) = (&chunk1[0], &chunk1[1], &chunk1[2], &chunk1[3]);
-        let (read_id2, seq2, _plus2, qual2) = (&chunk2[0], &chunk2[1], &chunk2[2], &chunk2[3]);
+        let (_read_id2, seq2, _plus2, qual2) = (&chunk2[0], &chunk2[1], &chunk2[2], &chunk2[3]);
 
+        let read_id1 = read_id1.trim_start_matches('@').trim_end().to_string();
         let cbc_str = seq1.get(0..cbc_len).expect("invalid range of string").to_string();
         let umi_str = seq1.get(cbc_len..cbc_len+umi_len).expect("invalid range of string").to_string();
 
         let cbc_qual = qual1.get(0..cbc_len).expect("invalid range of string").to_string();
         let umi_qual = qual1.get(cbc_len..cbc_len+umi_len).expect("invalid range of string").to_string();
-        
+
+        let read2_seq = if do_rev_comp{
+            reverse_complement(seq2.trim_end())
+        }else{
+            seq2.trim_end().to_string()
+        };
+
+        let read2_qual = if do_rev_comp {
+            qual2.trim_end().chars().rev().collect::<String>()
+        }else{
+            qual2.trim_end().to_string()
+        };
+            
+        read_id_buffer.push(read_id1);
+        start_buffer.push(0.to_string());
+        end_buffer.push(1.to_string());
+
         cbc_str_buffer.push(cbc_str);
         cbc_qual_buffer.push(cbc_qual);
         umi_str_buffer.push(umi_str);
         umi_qual_buffer.push(umi_qual);
+        read2_seq_buffer.push(read2_seq);
+        read2_qual_buffer.push(read2_qual);
+
 
         chunk_count += 1;
         
         // Check if chunk_count reached a million or it's the last iteration
-        if chunk_count == 100_000   {
+        if chunk_count == 10_000_000   {
 
 
             // Create a record batch
             let record_batch = RecordBatch::try_new(
                 arrow_schema.clone(),
                 vec![
+                    Arc::new(StringArray::from(read_id_buffer.clone())),
+                    Arc::new(StringArray::from(start_buffer.clone())),
+                    Arc::new(StringArray::from(end_buffer.clone())),
                     Arc::new(StringArray::from(cbc_str_buffer.clone())),
                     Arc::new(StringArray::from(umi_str_buffer.clone())),
                     Arc::new(StringArray::from(cbc_qual_buffer.clone())),
                     Arc::new(StringArray::from(umi_qual_buffer.clone())),
+                    Arc::new(StringArray::from(read2_seq_buffer.clone())),
+                    Arc::new(StringArray::from(read2_qual_buffer.clone())),
                 ],
             ).map_err(|e| { // Manually handle ArrowError
                 let err_msg = format!("Arrow error: {}", e);
@@ -124,10 +177,16 @@ fn process_files(in_fn1: String, in_fn2: String, cbc_len: usize, umi_len: usize,
             })?;
 
             // Reset buffer and counter
+            read_id_buffer.clear();
+            start_buffer.clear();
+            end_buffer.clear();
+
             cbc_str_buffer.clear();
             cbc_qual_buffer.clear();
             umi_str_buffer.clear();
             umi_qual_buffer.clear();
+            read2_seq_buffer.clear();
+            read2_qual_buffer.clear();
 
             chunk_count = 0;
         }
@@ -137,10 +196,15 @@ fn process_files(in_fn1: String, in_fn2: String, cbc_len: usize, umi_len: usize,
     let record_batch = RecordBatch::try_new(
         arrow_schema.clone(),
         vec![
+            Arc::new(StringArray::from(read_id_buffer.clone())),
+            Arc::new(StringArray::from(start_buffer.clone())),
+            Arc::new(StringArray::from(end_buffer.clone())),
             Arc::new(StringArray::from(cbc_str_buffer.clone())),
             Arc::new(StringArray::from(umi_str_buffer.clone())),
             Arc::new(StringArray::from(cbc_qual_buffer.clone())),
             Arc::new(StringArray::from(umi_qual_buffer.clone())),
+            Arc::new(StringArray::from(read2_seq_buffer.clone())),
+            Arc::new(StringArray::from(read2_qual_buffer.clone())),
         ],
     ).map_err(|e| { // Manually handle ArrowError
         let err_msg = format!("Arrow error: {}", e);
@@ -154,15 +218,17 @@ fn process_files(in_fn1: String, in_fn2: String, cbc_len: usize, umi_len: usize,
     })?;
 
     // Reset buffer and counter
+    read_id_buffer.clear();
+    start_buffer.clear();
+    end_buffer.clear();
     cbc_str_buffer.clear();
     cbc_qual_buffer.clear();
     umi_str_buffer.clear();
     umi_qual_buffer.clear();
 
-    chunk_count = 0;
 
     writer.close().unwrap();
-    Ok(results)
+    Ok(())
 }
 
 
