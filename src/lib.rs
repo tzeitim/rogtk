@@ -34,7 +34,7 @@ fn reverse_complement(dna: &str) -> String {
 }
 
 #[pyfunction]
-fn process_files(
+fn parse_paired_fastqs(
        in_fn1: String,
        in_fn2: String,
        cbc_len: usize,
@@ -56,16 +56,17 @@ fn process_files(
     let reader2 = io::BufReader::new(decoder2).lines().filter_map(Result::ok);
 
     // Define schema
+    //columns = ["readid", "start", "end", "cbc", "umi", "cbc_qual", "umi_qual", "seq", "qual"]
     let arrow_schema = Arc::new(Schema::new(vec![
-        Field::new("read_id", DataType::Utf8, false),
+        Field::new("readid", DataType::Utf8, false),
         Field::new("start", DataType::Utf8, false),
         Field::new("end", DataType::Utf8, false),
-        Field::new("cbc_str", DataType::Utf8, false),
-        Field::new("umi_str", DataType::Utf8, false),
+        Field::new("cbc", DataType::Utf8, false),
+        Field::new("umi", DataType::Utf8, false),
         Field::new("cbc_qual", DataType::Utf8, false),
         Field::new("umi_qual", DataType::Utf8, false),
-        Field::new("read2_seq", DataType::Utf8, false),
-        Field::new("read2_qual", DataType::Utf8, false),
+        Field::new("seq", DataType::Utf8, false),
+        Field::new("qual", DataType::Utf8, false),
     ]));
 
     // Initialize Parquet writer
