@@ -1,0 +1,39 @@
+[package]
+name = "rogtk"
+version = "0.1.0"
+authors = ["tzeitim <pedro.olivares@mdc-berlin.de>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+# The name of the native library. This is the name which will be used in Python to import the
+# library (i.e. `import string_sum`). If you change this, you must also change the name of the
+# `#[pymodule]` in `src/lib.rs`.
+name = "rogtk"
+# "cdylib" is necessary to produce a shared library for Python to import from.
+#
+# Downstream Rust code (including code in `bin/`, `examples/`, and `tests/`) will not be able
+# to `use string_sum;` unless the "rlib" or "lib" crate type is also included, e.g.:
+# crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
+
+
+[dependencies]
+
+#seal = "0.1.5"
+pyo3 = { version = "0.21.2", features = ["extension-module", "abi3-py38"] }
+flate2 = "1.0"
+itertools = "0.12.0" 
+parquet = "50.0.0"
+arrow = "50.0.0"
+tokio = "1.35.1"
+#polars = { version = "0.39.2", features = ["parquet", "lazy", "strings", "temporal", "random"] }
+polars = "0.39.2"
+chrono = "0.4.38"
+pyo3-polars = { version = "0.13.0", features = ["derive"] }
+serde = { version = "*", features = ["derive"] }
+target-lexicon = "0.12.14"
+#fasten = "0.4.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }

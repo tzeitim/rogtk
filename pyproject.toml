@@ -1,2 +1,15 @@
+##[build-system]
+##requires = ["setuptools", "wheel", "setuptools-rust", "maturin>=1.0,<2.0", "polars>=0.20.6"]
+##build-backend = "maturin"
 [build-system]
-requires = ["setuptools", "wheel", "setuptools-rust"]
+requires = ["maturin>=1.0,<2.0", "polars>=0.20.6"]
+build-backend = "maturin"
+
+[project]
+name = "minimal-plugin"
+requires-python = ">=3.8"
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]

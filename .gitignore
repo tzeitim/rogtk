@@ -1,0 +1,11 @@
+__pycache__/__init__.cpython-310.pyc
+build/lib.linux-x86_64-cpython-38/rogtk/rogtk.cpython-38-x86_64-linux-gnu.so
+dist/rogtk-0.0.1-py3.8-linux-x86_64.egg
+dmfq
+ll
+pfastq_processor
+rogtk/__pycache__/__init__.cpython-310.pyc
+rogtk/_internal.cpython-310-x86_64-linux-gnu.so
+rogtk/rogtk.abi3.so
+rogtk.egg-info
+target
