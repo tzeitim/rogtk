@@ -436,21 +436,18 @@ fn oparse_cigar(cigar: &str) -> PyResult<Vec<(char, String, String)>>{
 
 
 
-/// A Python module implemented in Rust. The name of this function must match
-/// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
-/// import the module.
+#[pymodule]
+fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    Ok(())
+}
+
 #[pymodule]
 fn rogtk(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     m.add_function(wrap_pyfunction!(oparse_cigar, m)?)?;
     m.add_function(wrap_pyfunction!(merge_paired_fastqs, m)?)?;
     m.add_function(wrap_pyfunction!(parse_paired_fastqs, m)?)?;
-    Ok(())
-}
-
-
-#[pymodule]
-fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    //m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
