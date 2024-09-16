@@ -45,12 +45,33 @@ struct ParseCigarKwargs {
     block_dels: bool,
 }
 
+#[derive(Deserialize)]
+struct Phred2NmKwargs {
+    base: u8,
+}
+
 #[polars_expr(output_type=String)]
 fn parse_cigar_series(inputs: &[Series], kwargs: ParseCigarKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
     //let out: StringChunked = ca.apply_to_buffer(parse_cigar_str);
     let out: StringChunked = ca.apply_to_buffer(|value, output|{
             parse_cigar_str(value, output, kwargs.block_dels);
+    });
+    Ok(out.into_series())
+}
+
+fn phred_to_numeric(phred_char: &str, output: &mut String, base: u8){
+    for phred_char in phred_char.chars() {
+    // PHRED+33 format (common in FASTQ files)
+        output.push_str(&format!("{}",phred_char as u8 - base));
+    }
+}
+#[polars_expr(output_type=String)]
+fn phred_to_numeric_series(inputs: &[Series], kwargs: Phred2NmKwargs) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let out: StringChunked= ca.apply_to_buffer(|value, output|{
+        // Convert PHRED score to numeric form
+            phred_to_numeric(value, output, kwargs.base);
     });
     Ok(out.into_series())
 }
