@@ -37,6 +37,7 @@ fn reverse_complement(dna: &str) -> String {
 
 
 #[pyfunction]
+#[pyo3(signature = (in_fn1, in_fn2, out_fn, limit=None, do_rev_comp=None))]
 fn merge_paired_fastqs(
        in_fn1: String,
        in_fn2: String,
@@ -195,7 +196,9 @@ fn merge_paired_fastqs(
 }
 
 #[pyfunction]
+#[pyo3(signature = (in_fn1, in_fn2, cbc_len, umi_len, out_fn, limit=None, do_rev_comp=None))]
 fn parse_paired_fastqs(
+    // Parse pair of fastqs according to a given chemistry (10x in this case)
        in_fn1: String,
        in_fn2: String,
        cbc_len: usize,

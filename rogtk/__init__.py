@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 import polars as pl
 from polars.plugins import register_plugin_function
 from polars.type_aliases import IntoExpr
+from .utils import *
 
 #@pl.api.register_expr_namespace("cigar")
 def parse_cigar(expr: IntoExpr, block_dels: bool=False) -> pl.Expr:
@@ -16,11 +17,22 @@ def parse_cigar(expr: IntoExpr, block_dels: bool=False) -> pl.Expr:
         is_elementwise=True,
     )
 #@pl.api.register_expr_namespace("phred")
-def phred_to_numeric(expr: IntoExpr, base: int=33) -> pl.Expr:
+def phred_to_numeric_str(expr: IntoExpr, base: int=33) -> pl.Expr:
     """Convert a PHRED score string into it's numeric value"""
     return register_plugin_function(
         plugin_path=Path(__file__).parent,
-        function_name="phred_to_numeric_series",
+        function_name="phred_to_numeric_series_str",
+        args=expr,
+        kwargs={"base": base},
+        is_elementwise=True,
+    )
+
+#@pl.api.register_expr_namespace("phred")
+def nn(expr: IntoExpr, base: int=33) -> pl.Expr:
+    """Convert a PHRED score string into it's numeric value"""
+    return register_plugin_function(
+        plugin_path=Path(__file__).parent,
+        function_name="nn",
         args=expr,
         kwargs={"base": base},
         is_elementwise=True,

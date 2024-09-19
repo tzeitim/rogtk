@@ -21,17 +21,18 @@ crate-type = ["cdylib"]
 [dependencies]
 
 #seal = "0.1.5"
-pyo3 = { version = "0.21.2", features = ["extension-module", "abi3-py38"] }
+pyo3 = { version = "0.22.2", features = ["extension-module", "abi3-py38"] }
 flate2 = "1.0"
 itertools = "0.12.0" 
 parquet = "50.0.0"
 arrow = "50.0.0"
 tokio = "1.35.1"
 #polars = { version = "0.39.2", features = ["parquet", "lazy", "strings", "temporal", "random"] }
-polars = "0.39.2"
+polars = "0.43.1"
+polars-core = { version = "0.43.1", features = ["dtype-array"], default-features = false }
 chrono = "0.4.38"
-pyo3-polars = { version = "0.13.0", features = ["derive"] }
-serde = { version = "*", features = ["derive"] }
+pyo3-polars = { version = "0.17.0", features = ["derive", "dtype-struct", "dtype-decimal", "dtype-array"] }
+serde = { version = "1", features = ["derive"] }
 target-lexicon = "0.12.14"
 #fasten = "0.4.3"
 
