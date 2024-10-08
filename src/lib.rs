@@ -16,6 +16,9 @@ use parquet::basic::Compression;
 use arrow::datatypes::{Schema, Field, DataType};
 
 mod expressions;
+mod single_fastq;
+use crate::single_fastq::{fastq_to_parquet};
+
 //extern crate fasten;
 /*use seal::pair::{
     Alignment, AlignmentSet, InMemoryAlignmentMatrix, NeedlemanWunsch, SmithWaterman, Step,Strategy,
@@ -451,6 +454,7 @@ fn rogtk(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(oparse_cigar, m)?)?;
     m.add_function(wrap_pyfunction!(merge_paired_fastqs, m)?)?;
     m.add_function(wrap_pyfunction!(parse_paired_fastqs, m)?)?;
+    m.add_function(wrap_pyfunction!(fastq_to_parquet, m)?)?;
     //m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
