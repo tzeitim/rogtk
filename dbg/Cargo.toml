@@ -1,0 +1,26 @@
+[package]
+name = "dbg"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "DNA sequence assembly using De Bruijn graphs"
+
+
+
+[dependencies]
+debruijn = "0.3.4"
+bit-set = "0.5.1"
+boomphf = { version = "0.5", features = ["serde"] }
+itertools = "0.7"
+log = "0.4"
+num-traits = "0.2"
+serde = "1"
+serde_derive = "1"
+serde_json = "1"
+smallvec = "1"
+# Pin to a single version
+env_logger = "0.9.3"
+
+[dev-dependencies]
+pretty_assertions = "0.5"
+rand = "0.5"
