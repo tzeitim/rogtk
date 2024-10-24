@@ -1,13 +1,49 @@
 use bio::io::fasta;
+use boomphf::hashmap::BoomHashMap2;
 use debruijn::*;
 use debruijn::dna_string::*;
 use debruijn::filter::*;
 use debruijn::compression::*;
 use debruijn::kmer::*;
+use debruijn::kmer::{Kmer16, Kmer32};
 use log::*;
 use env_logger;
 use std::path::Path;
 use anyhow::Result;
+
+
+fn create_dbg(k: usize, seq_tuples: &[(DnaString, Exts, ())], min_coverage: usize) 
+    -> Option<(BoomHashMap2<Kmer16, Exts, u16>, Vec<Kmer16>)> {  // Changed return type to Kmer16
+    
+    if k <= 16 {
+        info!("Using Kmer16 for k={}", k);
+        let (valid_kmers, all_kmers) = filter_kmers::<Kmer16, _, _, _, _>(
+            seq_tuples,
+            &Box::new(CountFilter::new(min_coverage)),
+            true,
+            true,
+            4
+        );
+
+        // Debug output
+        for (kmer, exts, count) in valid_kmers.iter() {
+            debug!("\nKmer: {}", kmer.to_string());
+            debug!("Coverage: {}", count);
+            debug!("Extensions: {:?}", exts);
+            
+            let left_exts = exts.get(Dir::Left);
+            let right_exts = exts.get(Dir::Right);
+            
+            debug!("Left extensions: {:?}", left_exts);
+            debug!("Right extensions: {:?}", right_exts);
+        }
+
+        Some((valid_kmers, all_kmers))
+    } else {
+        error!("K-mer size {} not supported. Please use k <= 16", k);
+        None
+    }
+}
 
 /// Read sequences from a FASTA file
 fn read_fasta_sequences(fasta_path: &Path) -> Result<Vec<DnaString>> {
@@ -73,16 +109,10 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
     // 3. Filter kmers and build initial DBG
     info!("Building De Bruijn graph with k={}", k);
     
-    // Choose appropriate Kmer type based on k value
-    let (valid_kmers, all_kmers) = match k {
-        k if k <= 4 => filter_kmers::<Kmer4, _, _, _, _>(&seq_tuples, &Box::new(CountFilter::new(min_coverage)), true, true, 4),
-        k if k <= 8 => filter_kmers::<Kmer8, _, _, _, _>(&seq_tuples, &Box::new(CountFilter::new(min_coverage)), true, true, 4),
-        k if k <= 16 => filter_kmers::<Kmer16, _, _, _, _>(&seq_tuples, &Box::new(CountFilter::new(min_coverage)), true, true, 4),
-        k if k <= 32 => filter_kmers::<Kmer32, _, _, _, _>(&seq_tuples, &Box::new(CountFilter::new(min_coverage)), true, true, 4),
-        _ => {
-            error!("K-mer size {} not supported. Please use k <= 32", k);
-            return Ok(Vec::new());
-        }
+
+        let (valid_kmers, all_kmers) = match create_dbg(k, &seq_tuples, min_coverage) {
+        Some(result) => result,
+        None => return Ok(Vec::new())
     };
 
     debug!("Found {} total k-mers before filtering", all_kmers.len());
