@@ -52,13 +52,13 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
     debug!("Loaded {} valid sequences from FASTA", sequences.len());
     
     // Print each sequence and its k-mers for debugging
-    for (i, seq) in sequences.iter().enumerate() {
-        debug!("Sequence {}: length={}, content={:?}", i, seq.len(), seq);
-        
-        if seq.len() >= k {
-            debug!("First k-mer from sequence {}: {:?}", i, seq.slice(0, k));
-        }
-    }
+    //for (i, seq) in sequences.iter().enumerate() {
+    //    debug!("Sequence {}: length={}, content={:?}", i, seq.len(), seq);
+    //    
+    //    //if seq.len() >= k {
+    //    //    debug!("First k-mer from sequence {}: {:?}", i, seq.slice(0, k));
+    //    //}
+    //}
     
     if sequences.is_empty() {
         warn!("No valid sequences to process!");
@@ -76,7 +76,7 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
     let (valid_kmers, all_kmers) = filter_kmers::<Kmer64, _, _, _, _>(
         &seq_tuples,
         &Box::new(CountFilter::new(min_coverage)),
-        false,  // stranded
+        true,  // stranded
         true,   // report all kmers  
         4       // memory size
     );
@@ -93,7 +93,7 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
     info!("Compressing graph...");
     let spec = SimpleCompress::new(|d1: u16, d2: &u16| d1.saturating_add(*d2));
     let compressed_graph = compress_kmers_with_hash(
-        false,
+        true,
         &spec, 
         &valid_kmers
     ).finish();
