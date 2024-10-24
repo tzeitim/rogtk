@@ -1,3 +1,4 @@
+
 use bio::io::fasta;
 use boomphf::hashmap::BoomHashMap2;
 use debruijn::*;
@@ -5,44 +6,113 @@ use debruijn::dna_string::*;
 use debruijn::filter::*;
 use debruijn::compression::*;
 use debruijn::kmer::*;
-use debruijn::kmer::{Kmer16, Kmer32};
 use log::*;
 use env_logger;
 use std::path::Path;
 use anyhow::Result;
+use std::fmt::Debug;
 
+// Simplified trait with only needed methods
+trait DbgInterface {
+    fn node_count(&self) -> usize;
+    fn terminal_count(&self) -> usize;
+    fn isolated_count(&self) -> usize;
+    fn compress_and_get_contigs(&self, min_size: usize) -> Vec<String>;
+}
 
-fn create_dbg(k: usize, seq_tuples: &[(DnaString, Exts, ())], min_coverage: usize) 
-    -> Option<(BoomHashMap2<Kmer16, Exts, u16>, Vec<Kmer16>)> {  // Changed return type to Kmer16
+// Implement the trait for our DbgResult
+impl<K: Kmer + Send + Sync + Debug + 'static> DbgInterface for DbgResult<K> {
+    fn node_count(&self) -> usize { self.node_count }
+    fn terminal_count(&self) -> usize { self.terminal_count }
+    fn isolated_count(&self) -> usize { self.isolated_count }
     
-    if k <= 16 {
-        info!("Using Kmer16 for k={}", k);
-        let (valid_kmers, all_kmers) = filter_kmers::<Kmer16, _, _, _, _>(
-            seq_tuples,
-            &Box::new(CountFilter::new(min_coverage)),
-            true,
-            true,
-            4
-        );
+    fn compress_and_get_contigs(&self, min_size: usize) -> Vec<String> {
+        let spec = SimpleCompress::new(|d1: u16, d2: &u16| {
+            debug!("Merging counts: d1={}, d2={}", d1, *d2);
+            d1.saturating_add(*d2)
+        });
 
-        // Debug output
-        for (kmer, exts, count) in valid_kmers.iter() {
-            debug!("\nKmer: {}", kmer.to_string());
-            debug!("Coverage: {}", count);
-            debug!("Extensions: {:?}", exts);
-            
-            let left_exts = exts.get(Dir::Left);
-            let right_exts = exts.get(Dir::Right);
-            
-            debug!("Left extensions: {:?}", left_exts);
-            debug!("Right extensions: {:?}", right_exts);
+        let compressed_graph = compress_kmers_with_hash(
+            true, 
+            &spec,
+            &self.valid_kmers
+        ).finish();
+
+        debug!("Compressed graph has {} nodes", compressed_graph.len());
+
+        let mut contigs = Vec::new();
+        for (i, node) in compressed_graph.iter_nodes().enumerate() {
+            let seq = node.sequence();
+            if seq.len() >= min_size {
+                let contig = seq.to_string();
+                debug!("Found contig {}: length={}, sequence={}", i, contig.len(), contig);
+                contigs.push(contig);
+            }
+        }
+        contigs
+    }
+}
+
+// Simplified struct without unused fields
+struct DbgResult<K: Kmer> {
+    node_count: usize,
+    terminal_count: usize,
+    isolated_count: usize,
+    valid_kmers: BoomHashMap2<K, Exts, u16>
+}
+
+fn analyze_dbg<K: Kmer + Send + Sync + Debug + 'static>(
+    seq_tuples: &[(DnaString, Exts, ())],
+    min_coverage: usize
+) -> Option<DbgResult<K>> {
+    info!("Using kmer size k={}", K::k());
+    let (valid_kmers, _) = filter_kmers::<K, _, _, _, _>(
+        seq_tuples,
+        &Box::new(CountFilter::new(min_coverage)),
+        true,
+        true,
+        4
+    );
+
+    // Count important graph features
+    let mut terminal_count = 0;
+    let mut isolated_count = 0;
+    let mut coverage_dist = std::collections::HashMap::new();
+
+    for (kmer, exts, count) in valid_kmers.iter() {
+        debug!("\nKmer: {}", kmer.to_string());
+        debug!("Coverage: {}", count);
+        debug!("Extensions: {:?}", exts);
+        
+        let left_exts = exts.get(Dir::Left);
+        let right_exts = exts.get(Dir::Right);
+        
+        debug!("Left extensions: {:?}", left_exts);
+        debug!("Right extensions: {:?}", right_exts);
+
+        // Track terminal and isolated nodes
+        if left_exts.is_empty() || right_exts.is_empty() {
+            terminal_count += 1;
+        }
+        if left_exts.is_empty() && right_exts.is_empty() {
+            isolated_count += 1;
         }
 
-        Some((valid_kmers, all_kmers))
-    } else {
-        error!("K-mer size {} not supported. Please use k <= 16", k);
-        None
+        // Track coverage distribution
+        *coverage_dist.entry(*count).or_insert(0) += 1;
     }
+
+    debug!("\nCoverage distribution:");
+    for (cov, count) in coverage_dist.iter() {
+        debug!("Coverage {}: {} kmers", cov, count);
+    }
+
+    Some(DbgResult {
+        node_count: valid_kmers.len(),
+        terminal_count,
+        isolated_count,
+        valid_kmers,
+    })
 }
 
 /// Read sequences from a FASTA file
@@ -87,13 +157,9 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
     let sequences = read_fasta_sequences(fasta_path)?;
     debug!("Loaded {} valid sequences from FASTA", sequences.len());
     
-    // Print each sequence and its k-mers for debugging
+    // Print each sequence for debugging
     for (i, seq) in sequences.iter().enumerate() {
         debug!("Sequence {}: length={}, content={:?}", i, seq.len(), seq);
-        
-        //if seq.len() >= k {
-        //    debug!("First k-mer from sequence {}: {:?}", i, seq.slice(0, k));
-        //}
     }
     
     if sequences.is_empty() {
@@ -109,91 +175,38 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
     // 3. Filter kmers and build initial DBG
     info!("Building De Bruijn graph with k={}", k);
     
-
-        let (valid_kmers, all_kmers) = match create_dbg(k, &seq_tuples, min_coverage) {
-        Some(result) => result,
-        None => return Ok(Vec::new())
+    let dbg_stats: Option<Box<dyn DbgInterface>> = match k {
+        k if k <= 4 => analyze_dbg::<Kmer4>(&seq_tuples, min_coverage)
+            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
+        k if k <= 8 => analyze_dbg::<Kmer8>(&seq_tuples, min_coverage)
+            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
+        k if k <= 16 => analyze_dbg::<Kmer16>(&seq_tuples, min_coverage)
+            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
+        k if k <= 32 => analyze_dbg::<Kmer32>(&seq_tuples, min_coverage)
+            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
+        k if k <= 64 => analyze_dbg::<Kmer64>(&seq_tuples, min_coverage)
+            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
+        _ => {
+            error!("K-mer size {} not supported. Please use k <= 64", k);
+            None
+        }
     };
 
-    debug!("Found {} total k-mers before filtering", all_kmers.len());
-    debug!("Found {} valid k-mers after filtering", valid_kmers.len());
-
-    if valid_kmers.is_empty() {
-        warn!("No valid k-mers found after filtering! Try reducing min_coverage");
-        return Ok(Vec::new());
-    }
-        // After your filter_kmers call but before compression:
-    debug!("Examining initial DBG structure...");
-
-    // First look at the raw kmers and their properties
-    for (kmer, exts, count) in valid_kmers.iter() {
-        println!("\nKmer: {}", kmer.to_string());
-        println!("Coverage: {}", count);
-        println!("Extensions: {:?}", exts);
-        
-        // Check if this kmer has extensions
-        let left_exts = exts.get(Dir::Left);
-        let right_exts = exts.get(Dir::Right);
-        
-        println!("Left extensions: {:?}", left_exts);
-        println!("Right extensions: {:?}", right_exts);
-    }
-
-    // Count kmers with no extensions (potential endpoints)
-    let terminal_kmers = valid_kmers.iter()
-        .filter(|(_, exts, _)| {
-            exts.get(Dir::Left).is_empty() || exts.get(Dir::Right).is_empty()
-        })
-        .count();
-
-    println!("Found {} terminal kmers (no extensions on at least one side)", terminal_kmers);
-
-    // Look for potential breaks in the graph
-    let isolated_kmers = valid_kmers.iter()
-        .filter(|(_, exts, _)| {
-            exts.get(Dir::Left).is_empty() && exts.get(Dir::Right).is_empty()
-        })
-        .count();
-
-    println!("Found {} completely isolated kmers (no extensions)", isolated_kmers);
-
-    // Check the coverage distribution
-    let mut coverage_dist = std::collections::HashMap::new();
-    for (_, _, count) in valid_kmers.iter() {
-        *coverage_dist.entry(*count).or_insert(0) += 1;
-    }
-
-    println!("\nCoverage distribution:");
-    for (cov, count) in coverage_dist.iter() {
-        println!("Coverage {}: {} kmers", cov, count);
-    }
-
-    // 4. Compress the graph
-    info!("Compressing graph...");
-    let spec = SimpleCompress::new(|d1: u16, d2: &u16| {
-        println!("d1: {}, d2: {}", d1, *d2);
-        d1.saturating_add(*d2)
-    }
-        );
-
-    let compressed_graph = compress_kmers_with_hash(
-        true,
-        &spec, 
-        &valid_kmers
-    ).finish();
-
-    debug!("Compressed graph has {} nodes", compressed_graph.len());
-
-    // 5. Extract contigs
-    let mut contigs = Vec::new();
-    for (i, node) in compressed_graph.iter_nodes().enumerate() {
-        let seq = node.sequence();
-        if seq.len() >= k {
-            let contig = seq.to_string();
-            debug!("Found contig {}: length={}, sequence={}", i, contig.len(), contig);
-            contigs.push(contig);
+    let dbg_stats = match dbg_stats {
+        Some(stats) => stats,
+        None => {
+            error!("Failed to create DBG with k={}", k);
+            return Ok(Vec::new());
         }
-    }
+    };
+
+    info!("DBG Statistics:");
+    info!("Total nodes: {}", dbg_stats.node_count());
+    info!("Terminal nodes: {}", dbg_stats.terminal_count());
+    info!("Isolated nodes: {}", dbg_stats.isolated_count());
+
+    // Get contigs using the trait method
+    let contigs = dbg_stats.compress_and_get_contigs(k);
 
     info!("Assembly complete. Found {} contigs", contigs.len());
     Ok(contigs)
@@ -206,7 +219,7 @@ fn main() -> Result<()> {
     let fasta_path = std::env::args().nth(1).expect("Please provide a FASTA file path");
     let k: usize = std::env::args().nth(2)
         .and_then(|s| s.parse().ok())
-        .unwrap_or(47);
+        .unwrap_or(20); // Default to k=20 instead of 47
     let min_coverage: usize = std::env::args().nth(3)
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
@@ -224,13 +237,11 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     fn create_test_fasta() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
-        
         let reads = vec![
             ">read1",
             "ATGCATGCATGCTAGCTGATCGATCGTAGCTAGCTAGCTGATCGATCGTACGTACGTACGTAGCTACGTACGTACGTAGCTAGCTGATCGTAGCTACGTAGCTAGCTAGCTGATCGTACGTACGT",
@@ -245,7 +256,6 @@ mod tests {
         for line in reads {
             writeln!(file, "{}", line).unwrap();
         }
-        
         file.flush().unwrap();
         file
     }
@@ -253,9 +263,10 @@ mod tests {
     #[test]
     fn test_fasta_assembly() {
         let _ = env_logger::try_init();
-        
         let test_file = create_test_fasta();
-        let contigs = assemble_fasta(test_file.path(), 47, 1).unwrap();
+        
+        // Use k=20 for testing instead of k=47
+        let contigs = assemble_fasta(test_file.path(), 20, 1).unwrap();
         
         assert!(!contigs.is_empty(), "Should produce at least one contig");
         
