@@ -52,13 +52,13 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
     debug!("Loaded {} valid sequences from FASTA", sequences.len());
     
     // Print each sequence and its k-mers for debugging
-    //for (i, seq) in sequences.iter().enumerate() {
-    //    debug!("Sequence {}: length={}, content={:?}", i, seq.len(), seq);
-    //    
-    //    //if seq.len() >= k {
-    //    //    debug!("First k-mer from sequence {}: {:?}", i, seq.slice(0, k));
-    //    //}
-    //}
+    for (i, seq) in sequences.iter().enumerate() {
+        debug!("Sequence {}: length={}, content={:?}", i, seq.len(), seq);
+        
+        //if seq.len() >= k {
+        //    debug!("First k-mer from sequence {}: {:?}", i, seq.slice(0, k));
+        //}
+    }
     
     if sequences.is_empty() {
         warn!("No valid sequences to process!");
@@ -73,13 +73,17 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
     // 3. Filter kmers and build initial DBG
     info!("Building De Bruijn graph with k={}", k);
     
-    let (valid_kmers, all_kmers) = filter_kmers::<Kmer64, _, _, _, _>(
-        &seq_tuples,
-        &Box::new(CountFilter::new(min_coverage)),
-        true,  // stranded
-        true,   // report all kmers  
-        4       // memory size
-    );
+    // Choose appropriate Kmer type based on k value
+    let (valid_kmers, all_kmers) = match k {
+        k if k <= 4 => filter_kmers::<Kmer4, _, _, _, _>(&seq_tuples, &Box::new(CountFilter::new(min_coverage)), true, true, 4),
+        k if k <= 8 => filter_kmers::<Kmer8, _, _, _, _>(&seq_tuples, &Box::new(CountFilter::new(min_coverage)), true, true, 4),
+        k if k <= 16 => filter_kmers::<Kmer16, _, _, _, _>(&seq_tuples, &Box::new(CountFilter::new(min_coverage)), true, true, 4),
+        k if k <= 32 => filter_kmers::<Kmer32, _, _, _, _>(&seq_tuples, &Box::new(CountFilter::new(min_coverage)), true, true, 4),
+        _ => {
+            error!("K-mer size {} not supported. Please use k <= 32", k);
+            return Ok(Vec::new());
+        }
+    };
 
     debug!("Found {} total k-mers before filtering", all_kmers.len());
     debug!("Found {} valid k-mers after filtering", valid_kmers.len());
@@ -88,10 +92,60 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
         warn!("No valid k-mers found after filtering! Try reducing min_coverage");
         return Ok(Vec::new());
     }
+        // After your filter_kmers call but before compression:
+    debug!("Examining initial DBG structure...");
+
+    // First look at the raw kmers and their properties
+    for (kmer, exts, count) in valid_kmers.iter() {
+        println!("\nKmer: {}", kmer.to_string());
+        println!("Coverage: {}", count);
+        println!("Extensions: {:?}", exts);
+        
+        // Check if this kmer has extensions
+        let left_exts = exts.get(Dir::Left);
+        let right_exts = exts.get(Dir::Right);
+        
+        println!("Left extensions: {:?}", left_exts);
+        println!("Right extensions: {:?}", right_exts);
+    }
+
+    // Count kmers with no extensions (potential endpoints)
+    let terminal_kmers = valid_kmers.iter()
+        .filter(|(_, exts, _)| {
+            exts.get(Dir::Left).is_empty() || exts.get(Dir::Right).is_empty()
+        })
+        .count();
+
+    println!("Found {} terminal kmers (no extensions on at least one side)", terminal_kmers);
+
+    // Look for potential breaks in the graph
+    let isolated_kmers = valid_kmers.iter()
+        .filter(|(_, exts, _)| {
+            exts.get(Dir::Left).is_empty() && exts.get(Dir::Right).is_empty()
+        })
+        .count();
+
+    println!("Found {} completely isolated kmers (no extensions)", isolated_kmers);
+
+    // Check the coverage distribution
+    let mut coverage_dist = std::collections::HashMap::new();
+    for (_, _, count) in valid_kmers.iter() {
+        *coverage_dist.entry(*count).or_insert(0) += 1;
+    }
+
+    println!("\nCoverage distribution:");
+    for (cov, count) in coverage_dist.iter() {
+        println!("Coverage {}: {} kmers", cov, count);
+    }
 
     // 4. Compress the graph
     info!("Compressing graph...");
-    let spec = SimpleCompress::new(|d1: u16, d2: &u16| d1.saturating_add(*d2));
+    let spec = SimpleCompress::new(|d1: u16, d2: &u16| {
+        println!("d1: {}, d2: {}", d1, *d2);
+        d1.saturating_add(*d2)
+    }
+        );
+
     let compressed_graph = compress_kmers_with_hash(
         true,
         &spec, 
