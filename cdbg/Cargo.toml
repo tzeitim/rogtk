@@ -1,0 +1,15 @@
+[package]
+name = "dbg_uncompressed"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "Uncompressed De Bruijn graph implementation"
+
+[dependencies]
+debruijn = "0.3.4"
+log = "0.4"
+env_logger = "0.9.3"
+itertools = "0.10"
+bit-set = "0.5"
+boomphf = { version = "0.5", features = ["serde"] }
+
