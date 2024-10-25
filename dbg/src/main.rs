@@ -1,4 +1,3 @@
-
 use bio::io::fasta;
 use boomphf::hashmap::BoomHashMap2;
 use debruijn::*;
@@ -11,6 +10,9 @@ use env_logger;
 use std::path::Path;
 use anyhow::Result;
 use std::fmt::Debug;
+
+mod graph_viz;
+use graph_viz::export_graph;
 
 // Simplified trait with only needed methods
 trait DbgInterface {
@@ -153,60 +155,104 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
         return Ok(Vec::new());
     }
 
-    // 1. Read and validate sequences from FASTA
     let sequences = read_fasta_sequences(fasta_path)?;
     debug!("Loaded {} valid sequences from FASTA", sequences.len());
-    
-    // Print each sequence for debugging
-    for (i, seq) in sequences.iter().enumerate() {
-        debug!("Sequence {}: length={}, content={:?}", i, seq.len(), seq);
-    }
     
     if sequences.is_empty() {
         warn!("No valid sequences to process!");
         return Ok(Vec::new());
     }
 
-    // 2. Create sequence tuples with empty extensions
     let seq_tuples: Vec<(DnaString, Exts, ())> = sequences.into_iter()
         .map(|s| (s, Exts::empty(), ()))
         .collect();
 
-    // 3. Filter kmers and build initial DBG
     info!("Building De Bruijn graph with k={}", k);
     
-    let dbg_stats: Option<Box<dyn DbgInterface>> = match k {
-        k if k <= 4 => analyze_dbg::<Kmer4>(&seq_tuples, min_coverage)
-            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
-        k if k <= 8 => analyze_dbg::<Kmer8>(&seq_tuples, min_coverage)
-            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
-        k if k <= 16 => analyze_dbg::<Kmer16>(&seq_tuples, min_coverage)
-            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
-        k if k <= 32 => analyze_dbg::<Kmer32>(&seq_tuples, min_coverage)
-            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
-        k if k <= 64 => analyze_dbg::<Kmer64>(&seq_tuples, min_coverage)
-            .map(|stats| Box::new(stats) as Box<dyn DbgInterface>),
+    // Generate output prefix from input filename
+    let prefix = fasta_path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("assembly");
+    
+    match k {
+        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, prefix),
+        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, prefix),
+        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, prefix),
+        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, prefix), 
+        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, prefix),
         _ => {
             error!("K-mer size {} not supported. Please use k <= 64", k);
-            None
+            Ok(Vec::new())
         }
+    }
+}
+
+fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
+    seq_tuples: &[(DnaString, Exts, ())],
+    min_coverage: usize,
+    prefix: &str
+) -> Result<Vec<String>> {
+    
+    // Analyze graph and get statistics
+    let preliminary_stats = analyze_dbg::<K>(seq_tuples, min_coverage)
+        .ok_or_else(|| anyhow::anyhow!("Failed to create graph"))?;
+
+    info!("Preliminary graph statistics:");
+    info!("  Total nodes: {}", preliminary_stats.node_count);
+    info!("  Terminal nodes: {}", preliminary_stats.terminal_count);
+    info!("  Isolated nodes: {}", preliminary_stats.isolated_count);
+
+    // Create and export preliminary graph
+    let preliminary_graph = {
+        let spec = SimpleCompress::new(|d1: u16, d2: &u16| d1.saturating_add(*d2));
+        compress_kmers_with_hash(true, &spec, &preliminary_stats.valid_kmers).finish()
+    };
+    
+    // Export preliminary graph
+    let prelim_path = format!("{}_preliminary.dot", prefix);
+    export_graph(&preliminary_graph, &prelim_path, "Preliminary")?;
+    info!("Exported preliminary graph to {}", prelim_path);
+
+    // Build compressed graph
+    let compressed_graph = {
+        let spec = SimpleCompress::new(|d1: u16, d2: &u16| d1.saturating_add(*d2));
+        compress_graph(true, &spec, preliminary_graph, None)
     };
 
-    let dbg_stats = match dbg_stats {
-        Some(stats) => stats,
-        None => {
-            error!("Failed to create DBG with k={}", k);
-            return Ok(Vec::new());
+    // Analyze compressed graph statistics
+    let mut terminal_count = 0;
+    let mut isolated_count = 0;
+    for node_id in 0..compressed_graph.len() {
+        let node = compressed_graph.get_node(node_id);
+        let left_edges = node.l_edges();
+        let right_edges = node.r_edges();
+        
+        if left_edges.is_empty() || right_edges.is_empty() {
+            terminal_count += 1;
         }
-    };
+        if left_edges.is_empty() && right_edges.is_empty() {
+            isolated_count += 1;
+        }
+    }
 
-    info!("DBG Statistics:");
-    info!("Total nodes: {}", dbg_stats.node_count());
-    info!("Terminal nodes: {}", dbg_stats.terminal_count());
-    info!("Isolated nodes: {}", dbg_stats.isolated_count());
+    info!("Compressed graph statistics:");
+    info!("  Total nodes: {}", compressed_graph.len());
+    info!("  Terminal nodes: {}", terminal_count);
+    info!("  Isolated nodes: {}", isolated_count);
 
-    // Get contigs using the trait method
-    let contigs = dbg_stats.compress_and_get_contigs(k);
+    // Export compressed graph
+    let comp_path = format!("{}_compressed.dot", prefix);
+    export_graph(&compressed_graph, &comp_path, "Compressed")?;
+    info!("Exported compressed graph to {}", comp_path);
+
+    // Extract contigs from compressed graph
+    let mut contigs = Vec::new();
+    for node in compressed_graph.iter_nodes() {
+        let seq = node.sequence();
+        if seq.len() >= K::k() {
+            contigs.push(seq.to_string());
+        }
+    }
 
     info!("Assembly complete. Found {} contigs", contigs.len());
     Ok(contigs)
