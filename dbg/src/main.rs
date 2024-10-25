@@ -5,6 +5,7 @@ use debruijn::dna_string::*;
 use debruijn::filter::*;
 use debruijn::compression::*;
 use debruijn::kmer::*;
+use debruijn::graph::BaseGraph;
 use log::*;
 use env_logger;
 use std::path::Path;
@@ -14,7 +15,6 @@ use std::fmt::Debug;
 mod graph_viz;
 use graph_viz::export_graph;
 
-// Simplified trait with only needed methods
 trait DbgInterface {
     fn node_count(&self) -> usize;
     fn terminal_count(&self) -> usize;
@@ -193,24 +193,26 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
     prefix: &str
 ) -> Result<Vec<String>> {
     
-    // Analyze graph and get statistics
+    // Get initial kmers and stats
     let preliminary_stats = analyze_dbg::<K>(seq_tuples, min_coverage)
         .ok_or_else(|| anyhow::anyhow!("Failed to create graph"))?;
 
-    info!("Preliminary graph statistics:");
-    info!("  Total nodes: {}", preliminary_stats.node_count);
-    info!("  Terminal nodes: {}", preliminary_stats.terminal_count);
-    info!("  Isolated nodes: {}", preliminary_stats.isolated_count);
+    info!("Initial k-mer statistics:");
+    info!("  Total kmers: {}", preliminary_stats.node_count);
+    info!("  Terminal kmers: {}", preliminary_stats.terminal_count);
+    info!("  Isolated kmers: {}", preliminary_stats.isolated_count);
 
-    // Create and export preliminary graph
-    let preliminary_graph = {
-        let spec = SimpleCompress::new(|d1: u16, d2: &u16| d1.saturating_add(*d2));
-        compress_kmers_with_hash(true, &spec, &preliminary_stats.valid_kmers).finish()
-    };
-    
-    // Export preliminary graph
+    // Build initial uncompressed graph directly from kmers
+    let mut preliminary_graph: BaseGraph<K, u16> = BaseGraph::new(true);
+    for (kmer, exts, count) in preliminary_stats.valid_kmers.iter() {
+        let kmer_bytes: Vec<u8> = (0..K::k()).map(|i| kmer.get(i)).collect();
+        preliminary_graph.add(&kmer_bytes, *exts, *count);
+    }
+    let preliminary_graph = preliminary_graph.finish();
+
+    // Export uncompressed preliminary graph
     let prelim_path = format!("{}_preliminary.dot", prefix);
-    export_graph(&preliminary_graph, &prelim_path, "Preliminary")?;
+    export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
     info!("Exported preliminary graph to {}", prelim_path);
 
     // Build compressed graph
@@ -218,27 +220,6 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
         let spec = SimpleCompress::new(|d1: u16, d2: &u16| d1.saturating_add(*d2));
         compress_graph(true, &spec, preliminary_graph, None)
     };
-
-    // Analyze compressed graph statistics
-    let mut terminal_count = 0;
-    let mut isolated_count = 0;
-    for node_id in 0..compressed_graph.len() {
-        let node = compressed_graph.get_node(node_id);
-        let left_edges = node.l_edges();
-        let right_edges = node.r_edges();
-        
-        if left_edges.is_empty() || right_edges.is_empty() {
-            terminal_count += 1;
-        }
-        if left_edges.is_empty() && right_edges.is_empty() {
-            isolated_count += 1;
-        }
-    }
-
-    info!("Compressed graph statistics:");
-    info!("  Total nodes: {}", compressed_graph.len());
-    info!("  Terminal nodes: {}", terminal_count);
-    info!("  Isolated nodes: {}", isolated_count);
 
     // Export compressed graph
     let comp_path = format!("{}_compressed.dot", prefix);
@@ -274,7 +255,9 @@ fn main() -> Result<()> {
     
     println!("\nAssembled {} contigs:", contigs.len());
     for (i, contig) in contigs.iter().enumerate() {
+        if contig.len() >= 200 {
         println!("Contig {}: {} (length={})", i+1, contig, contig.len());
+        }
     }
 
     Ok(())

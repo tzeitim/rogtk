@@ -47,11 +47,11 @@ pub fn export_graph<K: Kmer, D: std::fmt::Debug>(
         let right_edges = node.r_edges();
         
         let color = if left_edges.is_empty() && right_edges.is_empty() {
-            "crimson"  // Isolated nodes
+            "#ff110030"  // Isolated nodes
         } else if left_edges.is_empty() || right_edges.is_empty() {
-            "goldenrod"  // Terminal nodes
+            "#ff110030"  // Terminal nodes
         } else {
-            "cornflowerblue"  // Internal nodes
+            "#4895fa30"  // Internal nodes
         };
         
         writeln!(file, "    n{} [label=\"ID: {}\\nSeq: {}\\nData: {:?}\" style=filled fillcolor=\"{}\"]", 
