@@ -146,6 +146,86 @@ fn read_fasta_sequences(fasta_path: &Path) -> Result<Vec<DnaString>> {
 
     Ok(sequences)
 }
+pub fn assemble_sequences(
+    sequences: Vec<String>, 
+    k: usize, 
+    min_coverage: usize, 
+    export_graphs: Option<bool>,
+    only_largest: Option<bool>,
+    min_length: Option<usize>
+) -> Result<Vec<String>> {
+    info!("Starting assembly with k={}, min_coverage={}", k, min_coverage);
+    
+    if k > 64 {
+        error!("K-mer size {} not supported (maximum is 64)", k);
+        return Ok(Vec::new());
+    }
+
+    // Convert sequences to DnaString
+    let sequences: Vec<DnaString> = sequences.into_iter()
+        .filter_map(|seq| {
+            // Convert to uppercase and validate
+            let seq = seq.to_uppercase();
+            if seq.bytes().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
+                Some(DnaString::from_dna_string(&seq))
+            } else {
+                warn!("Skipping sequence with invalid characters");
+                None
+            }
+        })
+        .collect();
+
+    debug!("Processed {} valid sequences", sequences.len());
+    
+    if sequences.is_empty() {
+        warn!("No valid sequences to process!");
+        return Ok(Vec::new());
+    }
+
+    let seq_tuples: Vec<(DnaString, Exts, ())> = sequences.into_iter()
+        .map(|s| (s, Exts::empty(), ()))
+        .collect();
+
+    info!("Building De Bruijn graph with k={}", k);
+    
+    // Use a generic prefix since we don't have a filename
+    let prefix = "assembly";
+    
+    let contigs = match k {
+        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, prefix, export_graphs),
+        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, prefix, export_graphs),
+        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, prefix, export_graphs),
+        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, prefix, export_graphs), 
+        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, prefix, export_graphs),
+        _ => {
+            error!("K-mer size {} not supported. Please use k <= 64", k);
+            Ok(Vec::new())
+        }
+    }?;
+
+    // Filter by minimum length if specified
+    let min_length = min_length.unwrap_or(0);
+    let filtered_contigs: Vec<String> = contigs.into_iter()
+        .filter(|contig| contig.len() >= min_length)
+        .collect();
+
+    if filtered_contigs.is_empty() {
+        warn!("No contigs found with length >= {}", min_length);
+        return Ok(Vec::new());
+    }
+
+    // Return only the largest contig if requested
+    if only_largest.unwrap_or(false) {
+        if let Some(largest) = filtered_contigs.into_iter()
+            .max_by_key(|contig| contig.len()) {
+            Ok(vec![largest])
+        } else {
+            Ok(Vec::new())
+        }
+    } else {
+        Ok(filtered_contigs)
+    }
+}
 
 pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize, export_graphs: Option<bool>) -> Result<Vec<String>> {
     info!("Starting assembly of {} with k={}, min_coverage={}", 
@@ -276,6 +356,30 @@ pub fn fracture_fasta(
         .to_string();
     
     Ok(largest_contig)
+}
+
+#[pyfunction]
+#[pyo3(signature = (sequences, k, min_coverage, min_length=200, export_graphs=None, only_largest=None))]
+pub fn fracture_sequences(
+    sequences: Vec<String>, 
+    k: usize, 
+    min_coverage: usize,
+    min_length: Option<usize>,
+    export_graphs: Option<bool>,
+    only_largest: Option<bool>
+) -> PyResult<Vec<String>> {
+    // Try to initialize logger, ignore if already initialized
+    let _ = env_logger::try_init();
+    
+    // Perform assembly
+    assemble_sequences(
+        sequences, 
+        k, 
+        min_coverage, 
+        export_graphs,
+        only_largest,
+        min_length
+    ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
 }
 
 #[cfg(test)]
