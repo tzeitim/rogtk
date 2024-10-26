@@ -147,7 +147,7 @@ fn read_fasta_sequences(fasta_path: &Path) -> Result<Vec<DnaString>> {
     Ok(sequences)
 }
 
-pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Result<Vec<String>> {
+pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize, export_graphs: Option<bool>) -> Result<Vec<String>> {
     info!("Starting assembly of {} with k={}, min_coverage={}", 
           fasta_path.display(), k, min_coverage);
     
@@ -176,11 +176,11 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
         .unwrap_or("assembly");
     
     match k {
-        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, prefix),
-        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, prefix),
-        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, prefix),
-        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, prefix), 
-        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, prefix),
+        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, prefix, export_graphs),
+        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, prefix, export_graphs),
+        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, prefix, export_graphs),
+        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, prefix, export_graphs), 
+        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, prefix, export_graphs),
         _ => {
             error!("K-mer size {} not supported. Please use k <= 64", k);
             Ok(Vec::new())
@@ -191,8 +191,10 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize) -> Resul
 fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
     seq_tuples: &[(DnaString, Exts, ())],
     min_coverage: usize,
-    prefix: &str
+    prefix: &str,
+    export_graphs: Option<bool>,
 ) -> Result<Vec<String>> {
+    let should_export = export_graphs.unwrap_or(true);
     
     // Get initial kmers and stats
     let preliminary_stats = analyze_dbg::<K>(seq_tuples, min_coverage)
@@ -211,10 +213,12 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
     }
     let preliminary_graph = preliminary_graph.finish();
 
-    // Export uncompressed preliminary graph
-    let prelim_path = format!("{}_preliminary.dot", prefix);
-    export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
-    info!("Exported preliminary graph to {}", prelim_path);
+    // Export uncompressed preliminary graph if enabled
+    if should_export {
+        let prelim_path = format!("{}_preliminary.dot", prefix);
+        export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
+        info!("Exported preliminary graph to {}", prelim_path);
+    }
 
     // Build compressed graph
     let compressed_graph = {
@@ -222,10 +226,12 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
         compress_graph(true, &spec, preliminary_graph, None)
     };
 
-    // Export compressed graph
-    let comp_path = format!("{}_compressed.dot", prefix);
-    export_graph(&compressed_graph, &comp_path, "Compressed")?;
-    info!("Exported compressed graph to {}", comp_path);
+    // Export compressed graph if enabled
+    if should_export {
+        let comp_path = format!("{}_compressed.dot", prefix);
+        export_graph(&compressed_graph, &comp_path, "Compressed")?;
+        info!("Exported compressed graph to {}", comp_path);
+    }
 
     // Extract contigs from compressed graph
     let mut contigs = Vec::new();
@@ -241,21 +247,23 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (fasta_path, k, min_coverage, min_length=200))]
-pub fn assemble_contigs(
+#[pyo3(signature = (fasta_path, k, min_coverage, min_length=200, export_graphs=None))]
+pub fn fracture_fasta(
     fasta_path: String, 
     k: usize, 
     min_coverage: usize,
-    min_length: Option<usize>
+    min_length: Option<usize>,
+    export_graphs: Option<bool>
 ) -> PyResult<String> {
     // Initialize logger
-    env_logger::init();
+    //env_logger::init();
+    let _ = env_logger::try_init();
     
     // Use provided min_length or default to 200
     let min_length = min_length.unwrap_or(200);
     
     // Perform assembly
-    let contigs = assemble_fasta(Path::new(&fasta_path), k, min_coverage)
+    let contigs = assemble_fasta(Path::new(&fasta_path), k, min_coverage, export_graphs)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     
     // Find the largest contig
