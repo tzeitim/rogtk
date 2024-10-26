@@ -16,45 +16,6 @@ use std::fmt::Debug;
 
 use crate::graph_viz::export_graph;
 
-trait DbgInterface {
-    fn node_count(&self) -> usize;
-    fn terminal_count(&self) -> usize;
-    fn isolated_count(&self) -> usize;
-    fn compress_and_get_contigs(&self, min_size: usize) -> Vec<String>;
-}
-
-// Implement the trait for our DbgResult
-impl<K: Kmer + Send + Sync + Debug + 'static> DbgInterface for DbgResult<K> {
-    fn node_count(&self) -> usize { self.node_count }
-    fn terminal_count(&self) -> usize { self.terminal_count }
-    fn isolated_count(&self) -> usize { self.isolated_count }
-    
-    fn compress_and_get_contigs(&self, min_size: usize) -> Vec<String> {
-        let spec = SimpleCompress::new(|d1: u16, d2: &u16| {
-            debug!("Merging counts: d1={}, d2={}", d1, *d2);
-            d1.saturating_add(*d2)
-        });
-
-        let compressed_graph = compress_kmers_with_hash(
-            true, 
-            &spec,
-            &self.valid_kmers
-        ).finish();
-
-        debug!("Compressed graph has {} nodes", compressed_graph.len());
-
-        let mut contigs = Vec::new();
-        for (i, node) in compressed_graph.iter_nodes().enumerate() {
-            let seq = node.sequence();
-            if seq.len() >= min_size {
-                let contig = seq.to_string();
-                debug!("Found contig {}: length={}, sequence={}", i, contig.len(), contig);
-                contigs.push(contig);
-            }
-        }
-        contigs
-    }
-}
 
 // Simplified struct without unused fields
 struct DbgResult<K: Kmer> {
