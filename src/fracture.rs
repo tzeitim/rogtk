@@ -367,19 +367,33 @@ pub fn fracture_sequences(
     min_length: Option<usize>,
     export_graphs: Option<bool>,
     only_largest: Option<bool>
-) -> PyResult<Vec<String>> {
+) -> PyResult<String> {
     // Try to initialize logger, ignore if already initialized
     let _ = env_logger::try_init();
     
     // Perform assembly
-    assemble_sequences(
+    let contigs = assemble_sequences(
         sequences, 
         k, 
         min_coverage, 
         export_graphs,
         only_largest,
         min_length
-    ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+    // Return empty string if no contigs found
+    if contigs.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Get the appropriate contig (only one if only_largest is true)
+    if only_largest.unwrap_or(false) {
+        // We already know contigs is not empty, so this is safe
+        Ok(contigs[0].clone())
+    } else {
+        // Join all contigs with newlines
+        Ok(contigs.join("\n"))
+    }
 }
 
 #[cfg(test)]
