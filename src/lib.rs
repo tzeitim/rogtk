@@ -17,7 +17,12 @@ use arrow::datatypes::{Schema, Field, DataType};
 
 mod expressions;
 mod single_fastq;
+mod fracture;
+mod graph_viz;
+
 use crate::single_fastq::{fastq_to_parquet};
+use crate::fracture::{assemble_contigs, assemble_fasta};
+
 
 //extern crate fasten;
 /*use seal::pair::{
@@ -455,6 +460,7 @@ fn rogtk(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(merge_paired_fastqs, m)?)?;
     m.add_function(wrap_pyfunction!(parse_paired_fastqs, m)?)?;
     m.add_function(wrap_pyfunction!(fastq_to_parquet, m)?)?;
+    m.add_function(wrap_pyfunction!(assemble_contigs, m)?)?;
     //m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

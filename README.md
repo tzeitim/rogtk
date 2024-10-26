@@ -3,6 +3,10 @@ rust ogtk
 Installation
 ```
 pip install -e src/rogtk/
+
+#or
+
+maturing develop
 ```
 
 

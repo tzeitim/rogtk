@@ -34,7 +34,22 @@ chrono = "0.4.38"
 pyo3-polars = { version = "0.17.0", features = ["derive", "dtype-struct", "dtype-decimal", "dtype-array"] }
 serde = { version = "1", features = ["derive"] }
 target-lexicon = "0.12.14"
-#fasten = "0.4.3"
+
+#DBGraphs
+bio = "2.0.3"
+debruijn = "0.3.4"
+log = "0.4"
+env_logger = "0.9.3"
+bit-set = "0.5"
+boomphf = { version = "0.5", features = ["serde"] }
+clap = { version = "4.3", features = ["derive"] }
+anyhow = "1.0"
+tempfile = "3.13.0"
+
+num-traits = "0.2"
+#serde_derive = "1"
+#serde_json = "1"
+#smallvec = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
