@@ -16,6 +16,60 @@ use std::fmt::Debug;
 
 use crate::graph_viz::export_graph;
 
+fn estimate_k(sequences: &[String]) -> usize {
+    // Calculate mean read length
+    let total_length: usize = sequences.iter().map(|s| s.len()).sum();
+    let mean_length = total_length as f64 / sequences.len() as f64;
+    
+    // Estimate k as mean_length/3, rounded to nearest odd number
+    let k = (mean_length / 3.0).round() as usize;
+    
+    // Ensure k is odd (better for palindromes) and within valid range
+    let k = if k % 2 == 0 { k - 1 } else { k };
+    
+    // Clamp to valid range (min 4, max 64)
+    k.clamp(4, 64)
+}
+
+trait DbgInterface {
+    fn node_count(&self) -> usize;
+    fn terminal_count(&self) -> usize;
+    fn isolated_count(&self) -> usize;
+    fn compress_and_get_contigs(&self, min_size: usize) -> Vec<String>;
+}
+
+// Implement the trait for our DbgResult
+impl<K: Kmer + Send + Sync + Debug + 'static> DbgInterface for DbgResult<K> {
+    fn node_count(&self) -> usize { self.node_count }
+    fn terminal_count(&self) -> usize { self.terminal_count }
+    fn isolated_count(&self) -> usize { self.isolated_count }
+    
+    fn compress_and_get_contigs(&self, min_size: usize) -> Vec<String> {
+        let spec = SimpleCompress::new(|d1: u16, d2: &u16| {
+            debug!("Merging counts: d1={}, d2={}", d1, *d2);
+            d1.saturating_add(*d2)
+        });
+
+        let compressed_graph = compress_kmers_with_hash(
+            true, 
+            &spec,
+            &self.valid_kmers
+        ).finish();
+
+        debug!("Compressed graph has {} nodes", compressed_graph.len());
+
+        let mut contigs = Vec::new();
+        for (i, node) in compressed_graph.iter_nodes().enumerate() {
+            let seq = node.sequence();
+            if seq.len() >= min_size {
+                let contig = seq.to_string();
+                debug!("Found contig {}: length={}, sequence={}", i, contig.len(), contig);
+                contigs.push(contig);
+            }
+        }
+        contigs
+    }
+}
 
 // Simplified struct without unused fields
 struct DbgResult<K: Kmer> {
@@ -113,10 +167,20 @@ pub fn assemble_sequences(
     min_coverage: usize, 
     export_graphs: Option<bool>,
     only_largest: Option<bool>,
-    min_length: Option<usize>
+    min_length: Option<usize>,
+    auto_k: Option<bool> 
 ) -> Result<Vec<String>> {
     info!("Starting assembly with k={}, min_coverage={}", k, min_coverage);
     
+    let k = if auto_k.unwrap_or(false) {
+        let estimated_k = estimate_k(&sequences);
+        info!("Automatically estimated k = {} based on mean read length", estimated_k);
+        estimated_k
+    } else {
+        k
+    };
+
+
     if k > 64 {
         error!("K-mer size {} not supported (maximum is 64)", k);
         return Ok(Vec::new());
@@ -320,14 +384,32 @@ pub fn fracture_fasta(
 }
 
 #[pyfunction]
-#[pyo3(signature = (sequences, k, min_coverage, min_length=200, export_graphs=None, only_largest=None))]
+#[pyo3(signature = (sequences, k, min_coverage, min_length=200, export_graphs=None, only_largest=None, auto_k=None))]
+/// Assemble sequences using a de Bruijn graph approach
+/// 
+/// Args:
+///     sequences (List[str]): List of DNA sequences to assemble
+///     k (int): K-mer size for graph construction (used if auto_k=False)
+///     min_coverage (int): Minimum k-mer coverage threshold
+///     min_length (int, optional): Minimum contig length to return. Defaults to 200.
+///     export_graphs (bool, optional): Whether to export graph visualization files. Defaults to None.
+///     only_largest (bool, optional): Return only the largest contig. Defaults to None.
+///     auto_k (bool, optional): Automatically estimate optimal k-mer size. Defaults to True.
+/// 
+/// Returns:
+///     str: Assembled contigs separated by newlines, or single contig if only_largest=True
+/// 
+/// Example:
+///     >>> sequences = ["ATGCATGC", "TGCATGCA", "GCATGCAT"]
+///     >>> result = fracture_sequences(sequences, k=4, min_coverage=2)
 pub fn fracture_sequences(
     sequences: Vec<String>, 
     k: usize, 
     min_coverage: usize,
     min_length: Option<usize>,
     export_graphs: Option<bool>,
-    only_largest: Option<bool>
+    only_largest: Option<bool>,
+    auto_k: Option<bool>,
 ) -> PyResult<String> {
     // Try to initialize logger, ignore if already initialized
     let _ = env_logger::try_init();
@@ -339,20 +421,17 @@ pub fn fracture_sequences(
         min_coverage, 
         export_graphs,
         only_largest,
-        min_length
+        min_length,
+        auto_k
     ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-    // Return empty string if no contigs found
     if contigs.is_empty() {
         return Ok(String::new());
     }
 
-    // Get the appropriate contig (only one if only_largest is true)
     if only_largest.unwrap_or(false) {
-        // We already know contigs is not empty, so this is safe
         Ok(contigs[0].clone())
     } else {
-        // Join all contigs with newlines
         Ok(contigs.join("\n"))
     }
 }
