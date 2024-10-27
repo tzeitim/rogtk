@@ -17,18 +17,35 @@ use std::fmt::Debug;
 use crate::graph_viz::export_graph;
 
 fn estimate_k(sequences: &[String]) -> usize {
-    // Calculate mean read length
-    let total_length: usize = sequences.iter().map(|s| s.len()).sum();
-    let mean_length = total_length as f64 / sequences.len() as f64;
+    // Safety checks
+    if sequences.is_empty() {
+        return 31; // Default k value if no sequences
+    }
     
-    // Estimate k as mean_length/3, rounded to nearest odd number
+    // Calculate mean read length safely
+    let mut total_length: usize = 0;
+    let mut count = 0;
+    
+    for seq in sequences {
+        if !seq.is_empty() {
+            total_length = total_length.saturating_add(seq.len());
+            count += 1;
+        }
+    }
+    
+    if count == 0 {
+        return 31; // Default k value if all sequences are empty
+    }
+    
+    // Calculate mean length safely using floating point
+    let mean_length = (total_length as f64) / (count as f64);
+    
+    // Estimate k as mean_length/3, clamped to reasonable values
     let k = (mean_length / 3.0).round() as usize;
     
-    // Ensure k is odd (better for palindromes) and within valid range
+    // Ensure k is odd and within valid range (min 11, max 63)
     let k = if k % 2 == 0 { k - 1 } else { k };
-    
-    // Clamp to valid range (min 4, max 64)
-    k.clamp(4, 64)
+    k.clamp(11, 63)
 }
 
 trait DbgInterface {

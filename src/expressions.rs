@@ -4,6 +4,7 @@ use pyo3_polars::derive::polars_expr;
 //use crate::expressions::polars_plan::prelude::lit;
 use serde::Deserialize;
 //use std::fmt::Write;
+use crate::fracture::assemble_sequences;
 
 fn parse_cigar_str(cigar: &str, output: &mut String, block_dels: bool) {
     let mut num_buf = String::new();
@@ -219,5 +220,66 @@ fn split_string(phred_str: &str, output: &mut String, base: u8) {
 
     if output.ends_with('|') {
         output.pop();
+    }
+}
+
+
+// fracture
+#[derive(Deserialize)]
+struct AssemblyKwargs {
+    k: usize,
+    min_coverage: usize,
+    export_graphs: Option<bool>,
+    min_length: Option<usize>,
+    auto_k: Option<bool>,
+    prefix: Option<String>,
+}
+
+// Default string output type for the expression
+fn output_string_type(input_fields: &[Field]) -> PolarsResult<Field> {
+    let field = Field::new(input_fields[0].name().clone(), DataType::String);
+    Ok(field)
+}
+
+#[polars_expr(output_type_func=output_string_type)]
+fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsResult<Series> {
+    // Extract sequences from input series
+    let ca = inputs[0].str()?;
+    
+    // Convert string chunk to Vec<String>
+    let sequences: Vec<String> = ca.into_iter()
+        .flatten()
+        .map(|s| s.to_string())
+        .collect();
+    
+    // Call assembly function with only_largest always set to true
+    match assemble_sequences(
+        sequences,
+        kwargs.k,
+        kwargs.min_coverage,
+        kwargs.export_graphs,
+        Some(true), // Hardcoded to true
+        kwargs.min_length,
+        kwargs.auto_k,
+        kwargs.prefix,
+    ) {
+        Ok(contigs) => {
+            // Since only_largest is true, contigs will contain at most one item
+            let result = contigs.join("\n");
+            
+            // Create a new string chunked array
+            let ca = StringChunked::from_slice(
+                "assembled_sequences".into(),
+                &[result.as_str()]
+            );
+            
+            // Return as series
+            Ok(ca.into_series())
+        },
+        Err(e) => {
+            Err(PolarsError::ComputeError(
+                format!("Assembly failed: {}", e).into()
+            ))
+        }
     }
 }
