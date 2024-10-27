@@ -168,9 +168,10 @@ pub fn assemble_sequences(
     export_graphs: Option<bool>,
     only_largest: Option<bool>,
     min_length: Option<usize>,
-    auto_k: Option<bool> 
+    auto_k: Option<bool>,
+    prefix: Option<String>,
 ) -> Result<Vec<String>> {
-    info!("Starting assembly with k={}, min_coverage={}", k, min_coverage);
+    info!("Starting assembly of {} sequences with k={}, min_coverage={}", sequences.len(), k, min_coverage);
     
     let k = if auto_k.unwrap_or(false) {
         let estimated_k = estimate_k(&sequences);
@@ -213,15 +214,14 @@ pub fn assemble_sequences(
 
     info!("Building De Bruijn graph with k={}", k);
     
-    // Use a generic prefix since we don't have a filename
-    let prefix = "assembly";
+    let prefix = prefix.unwrap_or_else(|| "assembly".to_string());
     
     let contigs = match k {
-        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, prefix, export_graphs),
-        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, prefix, export_graphs),
-        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, prefix, export_graphs),
-        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, prefix, export_graphs), 
-        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, prefix, export_graphs),
+        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, &prefix, export_graphs),
+        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, &prefix, export_graphs),
+        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, &prefix, export_graphs),
+        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, &prefix, export_graphs), 
+        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, &prefix, export_graphs),
         _ => {
             error!("K-mer size {} not supported. Please use k <= 64", k);
             Ok(Vec::new())
@@ -384,7 +384,7 @@ pub fn fracture_fasta(
 }
 
 #[pyfunction]
-#[pyo3(signature = (sequences, k, min_coverage, min_length=200, export_graphs=None, only_largest=None, auto_k=None))]
+#[pyo3(signature = (sequences, k, min_coverage, min_length=200, export_graphs=None, only_largest=None, auto_k=None, prefix=None))]
 /// Assemble sequences using a de Bruijn graph approach
 /// 
 /// Args:
@@ -395,13 +395,11 @@ pub fn fracture_fasta(
 ///     export_graphs (bool, optional): Whether to export graph visualization files. Defaults to None.
 ///     only_largest (bool, optional): Return only the largest contig. Defaults to None.
 ///     auto_k (bool, optional): Automatically estimate optimal k-mer size. Defaults to True.
+///     prefix (str, optional): Prefix for output files. Defaults to "assembly".
 /// 
 /// Returns:
 ///     str: Assembled contigs separated by newlines, or single contig if only_largest=True
-/// 
-/// Example:
-///     >>> sequences = ["ATGCATGC", "TGCATGCA", "GCATGCAT"]
-///     >>> result = fracture_sequences(sequences, k=4, min_coverage=2)
+
 pub fn fracture_sequences(
     sequences: Vec<String>, 
     k: usize, 
@@ -410,6 +408,7 @@ pub fn fracture_sequences(
     export_graphs: Option<bool>,
     only_largest: Option<bool>,
     auto_k: Option<bool>,
+    prefix: Option<String>,
 ) -> PyResult<String> {
     // Try to initialize logger, ignore if already initialized
     let _ = env_logger::try_init();
@@ -422,7 +421,8 @@ pub fn fracture_sequences(
         export_graphs,
         only_largest,
         min_length,
-        auto_k
+        auto_k,
+        prefix
     ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
     if contigs.is_empty() {
