@@ -10,3 +10,5 @@ rogtk/rogtk.abi3.so
 rogtk.egg-info
 target
 .DS_Store
+rogtk/__pycache__
+Cargo.lock
