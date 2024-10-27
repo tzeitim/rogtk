@@ -9,3 +9,4 @@ rogtk/_internal.cpython-310-x86_64-linux-gnu.so
 rogtk/rogtk.abi3.so
 rogtk.egg-info
 target
+.DS_Store
