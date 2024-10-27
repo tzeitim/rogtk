@@ -89,6 +89,7 @@ def assemble_sequences(
             "auto_k": auto_k,
             "prefix": prefix
         },
+        returns_scalar=True,
         is_elementwise=False,
     )
 
