@@ -1,10 +1,8 @@
+use serde::Deserialize;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
-//use polars_core::series::amortized_iter::AmortSeries;
-//use crate::expressions::polars_plan::prelude::lit;
-use serde::Deserialize;
-//use std::fmt::Write;
 use crate::fracture::assemble_sequences;
+
 
 fn parse_cigar_str(cigar: &str, output: &mut String, block_dels: bool) {
     let mut num_buf = String::new();
@@ -282,4 +280,76 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
             ))
         }
     }
+}
+
+
+#[derive(Deserialize)]
+struct SweepParams {
+    k_start: usize,
+    k_end: usize,
+    k_step: usize,
+    cov_start: usize,
+    cov_end: usize, 
+    cov_step: usize,
+    export_graphs: Option<bool>,
+    prefix: Option<String>
+}
+
+fn list_int64_dtype(input_fields: &[Field]) -> PolarsResult<Field> {
+    let field = Field::new(
+        input_fields[0].name().clone(), 
+        DataType::List(Box::new(DataType::Int64))
+    );
+    Ok(field)
+}
+
+#[polars_expr(output_type_func=list_int64_dtype)]
+fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsResult<Series> {
+    // Extract sequences from input series
+    let ca = inputs[0].str()?;
+    
+    // Convert string chunk to Vec<String>
+    let sequences: Vec<String> = ca.into_iter()
+        .flatten()
+        .map(|s| s.to_string())
+        .collect();
+
+    // Create a list to store our inner series
+    let mut inner_series = Vec::new();
+
+    for k in (kwargs.k_start..=kwargs.k_end).step_by(kwargs.k_step) {
+        for min_cov in (kwargs.cov_start..=kwargs.cov_end).step_by(kwargs.cov_step) {
+            // Run assembly with current parameters
+            match assemble_sequences(
+                sequences.clone(),
+                k,
+                min_cov,
+                kwargs.export_graphs,
+                Some(true),
+                None,
+                None,
+                kwargs.prefix.clone(),
+            ) {
+                Ok(contigs) => {
+                    let length = if contigs.is_empty() { 0 } else { contigs[0].len() };
+                    let values = Int64Chunked::from_slice(
+                        PlSmallStr::EMPTY,
+                        &[k as i64, min_cov as i64, length as i64]
+                    );
+                    inner_series.push(values.into_series());
+                }
+                Err(_) => {
+                    let values = Int64Chunked::from_slice(
+                        PlSmallStr::EMPTY,
+                        &[k as i64, min_cov as i64, 0i64]
+                    );
+                    inner_series.push(values.into_series());
+                }
+            }
+        }
+    }
+
+    // Create list array from series
+    let list = Series::new(PlSmallStr::EMPTY, &inner_series).cast(&DataType::List(Box::new(DataType::Int64)))?;
+    Ok(list)
 }

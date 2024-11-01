@@ -93,11 +93,61 @@ def assemble_sequences(
         is_elementwise=False,
     )
 
-#def noop(expr: IntoExpr) -> pl.Expr:
-#    expr = parse_into_expr(expr)
-#    return expr.register_plugin(
-#        lib=lib,
-#        symbol="noop",
-#        is_elementwise=True,
-#    )
-#
+
+def sweep_assembly_params(
+    expr: IntoExpr,
+    k_start: int = 5,
+    k_end: int = 32,
+    k_step: int = 1,
+    cov_start: int = 1,
+    cov_end: int = 150,
+    cov_step: int = 1,
+    export_graphs: bool = False,
+    prefix: str | None = None
+) -> pl.Expr:
+    """
+    Run sequence assembly across ranges of k-mer size and minimum coverage parameters.
+    
+    Parameters
+    ----------
+    expr : IntoExpr
+        Input expression containing DNA sequences
+    k_start : int
+        Starting k-mer size
+    k_end : int
+        Ending k-mer size (inclusive)
+    k_step : int 
+        Step size for k-mer parameter
+    cov_start : int
+        Starting minimum coverage
+    cov_end : int
+        Ending minimum coverage (inclusive)
+    cov_step : int
+        Step size for coverage parameter
+    export_graphs : bool
+        Whether to export assembly graphs
+    prefix : str, optional
+        Prefix for output files
+        
+    Returns
+    -------
+    pl.Expr
+        Expression containing list of [k, min_coverage, max_contig_length] for each parameter combination
+    """
+    return register_plugin_function(
+        plugin_path=Path(__file__).parent,
+        function_name="sweep_assembly_params_expr",
+        args=expr,
+        kwargs={
+            "k_start": k_start,
+            "k_end": k_end,
+            "k_step": k_step,
+            "cov_start": cov_start,
+            "cov_end": cov_end,
+            "cov_step": cov_step,
+            "export_graphs": export_graphs,
+            "prefix": prefix
+        },
+        returns_scalar=True,
+        is_elementwise=False,
+    )
