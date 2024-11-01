@@ -2,7 +2,7 @@ use serde::Deserialize;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use crate::fracture::assemble_sequences;
-
+//use crate::fracture_opt::optimize_assembly;
 
 fn parse_cigar_str(cigar: &str, output: &mut String, block_dels: bool) {
     let mut num_buf = String::new();
@@ -332,7 +332,7 @@ fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsR
                 kwargs.export_graphs,
                 Some(true),
                 None,
-                None,
+                Some(false),
                 kwargs.prefix.clone(),
             ) {
                 Ok(contigs) => {
@@ -362,3 +362,5 @@ fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsR
     // Use the input field name for the output struct - no need for extra .into()
     Ok(df.into_struct(inputs[0].name().clone()).into())
 }
+
+

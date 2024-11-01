@@ -48,6 +48,7 @@ fn estimate_k(sequences: &[String]) -> usize {
     k.clamp(11, 63)
 }
 
+#[allow(dead_code)]
 trait DbgInterface {
     fn node_count(&self) -> usize;
     fn terminal_count(&self) -> usize;
