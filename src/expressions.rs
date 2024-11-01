@@ -295,15 +295,18 @@ struct SweepParams {
     prefix: Option<String>
 }
 
-fn list_int64_dtype(input_fields: &[Field]) -> PolarsResult<Field> {
-    let field = Field::new(
-        input_fields[0].name().clone(), 
-        DataType::List(Box::new(DataType::Int64))
-    );
+fn struct_output_type(input_fields: &[Field]) -> PolarsResult<Field> {
+    let fields = vec![
+        Field::new("k".into(), DataType::Int64),
+        Field::new("min_coverage".into(), DataType::Int64),
+        Field::new("contig_length".into(), DataType::Int64),
+    ];
+    let struct_type = DataType::Struct(fields);
+    let field = Field::new(input_fields[0].name().clone(), struct_type);
     Ok(field)
 }
 
-#[polars_expr(output_type_func=list_int64_dtype)]
+#[polars_expr(output_type_func=struct_output_type)]
 fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsResult<Series> {
     // Extract sequences from input series
     let ca = inputs[0].str()?;
@@ -314,8 +317,10 @@ fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsR
         .map(|s| s.to_string())
         .collect();
 
-    // Create a list to store our inner series
-    let mut inner_series = Vec::new();
+    // Create vectors to store our field values
+    let mut k_values = Vec::new();
+    let mut cov_values = Vec::new();
+    let mut len_values = Vec::new();
 
     for k in (kwargs.k_start..=kwargs.k_end).step_by(kwargs.k_step) {
         for min_cov in (kwargs.cov_start..=kwargs.cov_end).step_by(kwargs.cov_step) {
@@ -332,24 +337,28 @@ fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsR
             ) {
                 Ok(contigs) => {
                     let length = if contigs.is_empty() { 0 } else { contigs[0].len() };
-                    let values = Int64Chunked::from_slice(
-                        PlSmallStr::EMPTY,
-                        &[k as i64, min_cov as i64, length as i64]
-                    );
-                    inner_series.push(values.into_series());
+                    k_values.push(k as i64);
+                    cov_values.push(min_cov as i64);
+                    len_values.push(length as i64);
                 }
                 Err(_) => {
-                    let values = Int64Chunked::from_slice(
-                        PlSmallStr::EMPTY,
-                        &[k as i64, min_cov as i64, 0i64]
-                    );
-                    inner_series.push(values.into_series());
+                    k_values.push(k as i64);
+                    cov_values.push(min_cov as i64);
+                    len_values.push(0i64);
                 }
             }
         }
     }
 
-    // Create list array from series
-    let list = Series::new(PlSmallStr::EMPTY, &inner_series).cast(&DataType::List(Box::new(DataType::Int64)))?;
-    Ok(list)
+    // Create series for each field
+    let k_series = Series::new("k".into(), k_values);
+    let cov_series = Series::new("min_coverage".into(), cov_values);
+    let len_series = Series::new("contig_length".into(), len_values);
+
+    // Create struct from series
+    let fields = vec![k_series, cov_series, len_series];
+    let df = DataFrame::new(fields)?;
+    
+    // Use the input field name for the output struct - no need for extra .into()
+    Ok(df.into_struct(inputs[0].name().clone()).into())
 }
