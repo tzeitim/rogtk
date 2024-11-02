@@ -41,7 +41,14 @@ jobs:
       - name: Set up Rust
         run: rustup show
       - uses: mozilla-actions/sccache-action@v0.0.3
-      - run: make .venv
+      - name: Create virtual environment
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install pytest maturin ruff mypy
+
+          #- run: make .venv
       - run: make pre-commit
       - run: make install
       - run: make test
