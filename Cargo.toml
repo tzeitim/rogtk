@@ -1,7 +1,10 @@
 [package]
 name = "rogtk"
 version = "0.1.0"
-authors = ["tzeitim <pedro.olivares@mdc-berlin.de>"]
+authors = [
+  "Pedro Olivares Chauvet <pedro.olivares@mdc-berlin.de>", 
+  "Pedro Olivares Chauvet <pedro.olivares@weizmann.ac.il>", 
+]
 edition = "2018"
 
 [lib]
