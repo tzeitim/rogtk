@@ -1,14 +1,19 @@
 SHELL=/bin/bash
 
-install:
+.venv:
+	python -m venv .venv
+	.venv/bin/pip install --upgrade pip
+	.venv/bin/pip install pytest maturin
+
+install: .venv
 	unset CONDA_PREFIX && \
 	source .venv/bin/activate && maturin develop
 
-install-release:
+install-release: .venv
 	unset CONDA_PREFIX && \
 	source .venv/bin/activate && maturin develop --release
 
-test:
+test: .venv install
 	.venv/bin/python -m pytest tests
 
 run: install
