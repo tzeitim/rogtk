@@ -32,11 +32,12 @@ mod types {
         pub params: ParamPoint,
         pub length: usize,
         pub has_anchors: bool,
+        pub input_sequences: usize,  // Added field for input sequence count
     }
 
 
     impl AssemblyResult {
-        pub fn new(contig: String, k: usize, min_coverage: usize, start_anchor: &str, end_anchor: &str) -> Self {
+        pub fn new(contig: String, k: usize, min_coverage: usize, start_anchor: &str, end_anchor: &str, input_sequences: usize) -> Self {
             let length = contig.len();
             let has_anchors = contig.contains(start_anchor) && contig.contains(end_anchor);
             Self {
@@ -44,6 +45,7 @@ mod types {
                 params: ParamPoint { k, min_coverage },
                 length,
                 has_anchors,
+                input_sequences,
             }
         }
     }
@@ -100,17 +102,18 @@ pub fn optimize_assembly(
     max_iterations: usize,
     explore_k: bool,
 ) -> Result<Option<AssemblyResult>> {
+    let sequence_count = sequences.len();
     info!("Starting assembly optimization with:");
     info!("  Initial k: {}, min_coverage: {}", params.k, params.min_coverage);
     info!("  Max iterations: {}, explore_k: {}", max_iterations, explore_k);
     info!("  Start anchor: {}", start_anchor);
     info!("  End anchor: {}", end_anchor);
-    info!("  Number of input sequences: {}", sequences.len());
+    info!("  Number of input sequences: {}", sequence_count);
 
     let mut tested_params = HashSet::new();
     tested_params.insert(params);
     
-    let mut current = assemble_and_check(sequences, params, start_anchor, end_anchor)?;
+    let mut current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequence_count)?;
     debug!("Initial assembly result:");
     debug!("  Contig length: {}", current.length);
     debug!("  Has anchors: {}", current.has_anchors);
@@ -137,7 +140,7 @@ pub fn optimize_assembly(
                     debug!("Testing new params - k: {}, min_coverage: {}", new_params.k, new_params.min_coverage);
                     tested_params.insert(new_params);
                     
-                    let result = assemble_and_check(sequences, new_params, start_anchor, end_anchor)?;
+                    let result = assemble_and_check(sequences, new_params, start_anchor, end_anchor, sequence_count)?;
                     debug!("  Result - length: {}, has_anchors: {}", result.length, result.has_anchors);
                     
                     if result.has_anchors {
@@ -181,6 +184,7 @@ fn assemble_and_check(
     params: ParamPoint,
     start_anchor: &str,
     end_anchor: &str,
+    input_sequences: usize,
 ) -> Result<AssemblyResult> {
     debug!("Attempting assembly with k={}, min_coverage={}", params.k, params.min_coverage);
     
@@ -208,7 +212,8 @@ fn assemble_and_check(
         params.k,
         params.min_coverage,
         start_anchor,
-        end_anchor
+        end_anchor,
+        input_sequences
     ))
 }
 
@@ -220,6 +225,7 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
         .map(|s| s.to_string())
         .collect();
         
+    let sequence_count = sequences.len();
     let max_iterations = kwargs.max_iterations.unwrap_or(50);
     let explore_k = kwargs.explore_k.unwrap_or(false);
     
@@ -229,7 +235,7 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
     };
     
     info!("Starting assembly optimization expression");
-    info!("Input sequences: {}", sequences.len());
+    info!("Input sequences: {}", sequence_count);
     
     match optimize_assembly(
         &sequences,
@@ -248,6 +254,7 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
                 Series::new("k".into(), vec![result.params.k as u32]),
                 Series::new("min_coverage".into(), vec![result.params.min_coverage as u32]),
                 Series::new("length".into(), vec![result.length as u32]),
+                Series::new("input_sequences".into(), vec![result.input_sequences as u32]),
             ])?;
             
             Ok(df.into_struct(inputs[0].name().clone()).into())
@@ -260,6 +267,7 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
                 Series::new("k".into(), vec![0u32]),
                 Series::new("min_coverage".into(), vec![0u32]),
                 Series::new("length".into(), vec![0u32]),
+                Series::new("input_sequences".into(), vec![sequence_count as u32]),
             ])?;
             
             Ok(df.into_struct(inputs[0].name().clone()).into())
@@ -279,6 +287,7 @@ fn output_type(input_fields: &[Field]) -> PolarsResult<Field> {
         Field::new("k".into(), DataType::UInt32),
         Field::new("min_coverage".into(), DataType::UInt32),
         Field::new("length".into(), DataType::UInt32),
+        Field::new("input_sequences".into(), DataType::UInt32),
     ];
     let struct_type = DataType::Struct(fields);
     Ok(Field::new(input_fields[0].name().clone(), struct_type))
