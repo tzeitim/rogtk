@@ -13,6 +13,11 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
