@@ -4,6 +4,7 @@ use serde::Deserialize;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use crate::fracture::assemble_sequences;
+use log::*;
 
 
 #[derive(Deserialize)]
@@ -99,15 +100,28 @@ pub fn optimize_assembly(
     max_iterations: usize,
     explore_k: bool,
 ) -> Result<Option<AssemblyResult>> {
+    info!("Starting assembly optimization with:");
+    info!("  Initial k: {}, min_coverage: {}", params.k, params.min_coverage);
+    info!("  Max iterations: {}, explore_k: {}", max_iterations, explore_k);
+    info!("  Start anchor: {}", start_anchor);
+    info!("  End anchor: {}", end_anchor);
+    info!("  Number of input sequences: {}", sequences.len());
+
     let mut tested_params = HashSet::new();
     tested_params.insert(params);
     
     let mut current = assemble_and_check(sequences, params, start_anchor, end_anchor)?;
+    debug!("Initial assembly result:");
+    debug!("  Contig length: {}", current.length);
+    debug!("  Has anchors: {}", current.has_anchors);
+    
     if current.has_anchors {
+        info!("Found solution on initial attempt!");
         return Ok(Some(current));
     }
     
-    for _ in 0..max_iterations {
+    for iteration in 0..max_iterations {
+        debug!("\nIteration {}/{}", iteration + 1, max_iterations);
         let mut candidates = Vec::new();
         
         let directions = if explore_k {
@@ -117,27 +131,47 @@ pub fn optimize_assembly(
         };
         
         for direction in directions {
+            debug!("Trying direction: {:?}", direction);
             if let Some(new_params) = direction.apply(current.params) {
                 if !tested_params.contains(&new_params) {
+                    debug!("Testing new params - k: {}, min_coverage: {}", new_params.k, new_params.min_coverage);
                     tested_params.insert(new_params);
                     
                     let result = assemble_and_check(sequences, new_params, start_anchor, end_anchor)?;
+                    debug!("  Result - length: {}, has_anchors: {}", result.length, result.has_anchors);
+                    
                     if result.has_anchors {
+                        info!("Found solution at iteration {}!", iteration + 1);
+                        info!("Final parameters: k={}, min_coverage={}", new_params.k, new_params.min_coverage);
                         return Ok(Some(result));
                     }
                     candidates.push(result);
+                } else {
+                    debug!("Parameters already tested, skipping");
                 }
+            } else {
+                debug!("Invalid parameters for direction {:?}, skipping", direction);
             }
         }
         
         if candidates.is_empty() {
+            info!("No more valid parameter combinations to try");
             break;
         }
         
         current = candidates.into_iter()
             .max_by_key(|r| r.length)
             .unwrap();
+        
+        debug!("Selected best candidate:");
+        debug!("  k: {}, min_coverage: {}", current.params.k, current.params.min_coverage);
+        debug!("  length: {}", current.length);
     }
+    
+    info!("Optimization completed without finding anchors");
+    info!("Parameters tested: {}", tested_params.len());
+    info!("Best result: length={}, k={}, min_coverage={}", 
+          current.length, current.params.k, current.params.min_coverage);
     
     Ok(None)
 }
@@ -148,6 +182,8 @@ fn assemble_and_check(
     start_anchor: &str,
     end_anchor: &str,
 ) -> Result<AssemblyResult> {
+    debug!("Attempting assembly with k={}, min_coverage={}", params.k, params.min_coverage);
+    
     let contigs = assemble_sequences(
         sequences.to_vec(),
         params.k,
@@ -160,8 +196,10 @@ fn assemble_and_check(
     )?;
     
     let contig = if contigs.is_empty() {
+        debug!("No contigs produced");
         String::new()
     } else {
+        debug!("Produced contig of length {}", contigs[0].len());
         contigs[0].clone()
     };
     
@@ -190,6 +228,9 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
         min_coverage: kwargs.start_min_coverage,
     };
     
+    info!("Starting assembly optimization expression");
+    info!("Input sequences: {}", sequences.len());
+    
     match optimize_assembly(
         &sequences,
         start_params,
@@ -199,6 +240,9 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
         explore_k,
     ) {
         Ok(Some(result)) => {
+            info!("Optimization successful");
+            info!("Final contig length: {}", result.length);
+            
             let df = DataFrame::new(vec![
                 Series::new("contig".into(), vec![result.contig]),
                 Series::new("k".into(), vec![result.params.k as u32]),
@@ -209,6 +253,8 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
             Ok(df.into_struct(inputs[0].name().clone()).into())
         },
         Ok(None) => {
+            info!("Optimization completed without finding anchors");
+            
             let df = DataFrame::new(vec![
                 Series::new("contig".into(), vec!["" as &str]),
                 Series::new("k".into(), vec![0u32]),
@@ -218,9 +264,12 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
             
             Ok(df.into_struct(inputs[0].name().clone()).into())
         },
-        Err(e) => Err(PolarsError::ComputeError(
-            format!("Assembly optimization failed: {}", e).into()
-        )),
+        Err(e) => {
+            error!("Assembly optimization failed: {}", e);
+            Err(PolarsError::ComputeError(
+                format!("Assembly optimization failed: {}", e).into()
+            ))
+        },
     }
 }
 
