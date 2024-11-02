@@ -24,34 +24,6 @@ env:
   RUSTFLAGS: "-Dwarnings"
 
 jobs:
-  linux_tests:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [x86_64]
-        python-version: ["3.8", "3.9", "3.10", "3.11"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Set up Rust
-        run: rustup show
-        
-      - uses: mozilla-actions/sccache-action@v0.0.3
-      
-      # Create virtual environment and install dependencies
-      - name: Create virtual environment
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          python -m pip install --upgrade pip
-          python -m pip install pytest maturin
-      
-      # Build and test
-      - run: make install
-      - run: make test
   linux:
     runs-on: ubuntu-latest
     strategy:
@@ -65,16 +37,14 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          
           target: ${{ matrix.target }}
-          
           args: --release --out dist --find-interpreter
           sccache: 'true'
           manylinux: auto
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-linux-${{ matrix.target }}  # Make name unique
           path: dist
 
   windows:
@@ -87,21 +57,16 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          
-          architecture: ${{ matrix.target }}
-          
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          
           target: ${{ matrix.target }}
-          
           args: --release --out dist --find-interpreter
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-windows-${{ matrix.target }}  # Make name unique
           path: dist
 
   macos:
@@ -117,15 +82,13 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          
           target: ${{ matrix.target }}
-          
           args: --release --out dist --find-interpreter
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-macos-${{ matrix.target }}  # Make name unique
           path: dist
 
   sdist:
@@ -140,7 +103,7 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-sdist  # Make name unique
           path: dist
 
   release:
@@ -150,14 +113,15 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write  # IMPORTANT: mandatory for trusted publishing
+      id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: wheels
+          pattern: wheels-*  # Download all wheel artifacts
+          merge-multiple: true  # Merge them into one directory
+          path: dist
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         with:
           command: upload
-          args: --non-interactive --skip-existing *
-
