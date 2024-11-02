@@ -93,7 +93,6 @@ mod types {
 
 use types::*;
 
-// Core optimization logic
 pub fn optimize_assembly(
     sequences: &[String],
     params: ParamPoint,
@@ -102,18 +101,17 @@ pub fn optimize_assembly(
     max_iterations: usize,
     explore_k: bool,
 ) -> Result<Option<AssemblyResult>> {
-    let sequence_count = sequences.len();
     info!("Starting assembly optimization with:");
     info!("  Initial k: {}, min_coverage: {}", params.k, params.min_coverage);
     info!("  Max iterations: {}, explore_k: {}", max_iterations, explore_k);
     info!("  Start anchor: {}", start_anchor);
     info!("  End anchor: {}", end_anchor);
-    info!("  Number of input sequences: {}", sequence_count);
+    info!("  Number of input sequences: {}", sequences.len());
 
     let mut tested_params = HashSet::new();
     tested_params.insert(params);
     
-    let mut current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequence_count)?;
+    let current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequences.len())?;
     debug!("Initial assembly result:");
     debug!("  Contig length: {}", current.length);
     debug!("  Has anchors: {}", current.has_anchors);
@@ -122,6 +120,10 @@ pub fn optimize_assembly(
         info!("Found solution on initial attempt!");
         return Ok(Some(current));
     }
+
+    // Track current best length and all parameter points that achieved it
+    let mut best_length = current.length;
+    let mut current_points = vec![current.params];
     
     for iteration in 0..max_iterations {
         debug!("\nIteration {}/{}", iteration + 1, max_iterations);
@@ -133,27 +135,32 @@ pub fn optimize_assembly(
             vec![Direction::West, Direction::East]
         };
         
-        for direction in directions {
-            debug!("Trying direction: {:?}", direction);
-            if let Some(new_params) = direction.apply(current.params) {
-                if !tested_params.contains(&new_params) {
-                    debug!("Testing new params - k: {}, min_coverage: {}", new_params.k, new_params.min_coverage);
-                    tested_params.insert(new_params);
-                    
-                    let result = assemble_and_check(sequences, new_params, start_anchor, end_anchor, sequence_count)?;
-                    debug!("  Result - length: {}, has_anchors: {}", result.length, result.has_anchors);
-                    
-                    if result.has_anchors {
-                        info!("Found solution at iteration {}!", iteration + 1);
-                        info!("Final parameters: k={}, min_coverage={}", new_params.k, new_params.min_coverage);
-                        return Ok(Some(result));
+        // Try all directions from all current points
+        for &point in &current_points {
+            debug!("Exploring from point k={}, min_coverage={}", point.k, point.min_coverage);
+            
+            for direction in &directions {
+                debug!("Trying direction: {:?}", direction);
+                if let Some(new_params) = direction.apply(point) {
+                    if !tested_params.contains(&new_params) {
+                        debug!("Testing new params - k: {}, min_coverage: {}", new_params.k, new_params.min_coverage);
+                        tested_params.insert(new_params);
+                        
+                        let result = assemble_and_check(sequences, new_params, start_anchor, end_anchor, sequences.len())?;
+                        debug!("  Result - length: {}, has_anchors: {}", result.length, result.has_anchors);
+                        
+                        if result.has_anchors {
+                            info!("Found solution at iteration {}!", iteration + 1);
+                            info!("Final parameters: k={}, min_coverage={}", new_params.k, new_params.min_coverage);
+                            return Ok(Some(result));
+                        }
+                        candidates.push(result);
+                    } else {
+                        debug!("Parameters already tested, skipping");
                     }
-                    candidates.push(result);
                 } else {
-                    debug!("Parameters already tested, skipping");
+                    debug!("Invalid parameters for direction {:?}, skipping", direction);
                 }
-            } else {
-                debug!("Invalid parameters for direction {:?}, skipping", direction);
             }
         }
         
@@ -161,22 +168,54 @@ pub fn optimize_assembly(
             info!("No more valid parameter combinations to try");
             break;
         }
-        
-        current = candidates.into_iter()
-            .max_by_key(|r| r.length)
+
+        // Find best length among new candidates
+        let max_length = candidates.iter()
+            .map(|r| r.length)
+            .max()
             .unwrap();
-        
-        debug!("Selected best candidate:");
-        debug!("  k: {}, min_coverage: {}", current.params.k, current.params.min_coverage);
-        debug!("  length: {}", current.length);
+
+        if max_length > best_length {
+            // If we found better solutions, only keep those points
+            debug!("Found better length: {} > {}", max_length, best_length);
+            best_length = max_length;
+            current_points = candidates.iter()
+                .filter(|r| r.length == max_length)
+                .map(|r| r.params)
+                .collect();
+            
+            debug!("New best points:");
+            for point in &current_points {
+                debug!("  k: {}, min_coverage: {}", point.k, point.min_coverage);
+            }
+        } else if max_length == best_length {
+            // If we found equal solutions, add those points
+            debug!("Found equal length solutions, adding to exploration points");
+            current_points.extend(
+                candidates.iter()
+                    .filter(|r| r.length == max_length)
+                    .map(|r| r.params)
+            );
+            debug!("Current exploration points:");
+            for point in &current_points {
+                debug!("  k: {}, min_coverage: {}", point.k, point.min_coverage);
+            }
+        }
+        // If max_length < best_length, we keep our current points and continue exploring from them
     }
     
     info!("Optimization completed without finding anchors");
     info!("Parameters tested: {}", tested_params.len());
-    info!("Best result: length={}, k={}, min_coverage={}", 
-          current.length, current.params.k, current.params.min_coverage);
+    info!("Best result: length={}", best_length);
+    info!("Best points:");
+    for point in &current_points {
+        info!("  k={}, min_coverage={}", point.k, point.min_coverage);
+    }
     
-    Ok(None)
+    // Return result with parameters from first current point
+    // (all points have same length at this point)
+    let final_result = assemble_and_check(sequences, current_points[0], start_anchor, end_anchor, sequences.len())?;
+    Ok(Some(final_result))
 }
 
 fn assemble_and_check(
@@ -219,6 +258,8 @@ fn assemble_and_check(
 
 #[polars_expr(output_type_func=output_type)]
 pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> PolarsResult<Series> {
+    let _ = env_logger::try_init();
+
     let ca = inputs[0].str()?;
     let sequences: Vec<String> = ca.into_iter()
         .flatten()
