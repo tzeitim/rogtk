@@ -121,17 +121,16 @@ pub fn optimize_assembly(
     
     let current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequences.len())?;
     
-    if current.has_anchors {
-        info!("Found solution on initial attempt!");
-        return Ok(Some(current));
-    }
+    // Track best result that has both anchors
+    let mut best_with_anchors: Option<AssemblyResult> = if current.has_anchors {
+        info!("Found initial solution!");
+        Some(current.clone())
+    } else {
+        None
+    };
 
-    // Track current best length and all parameter points that achieved it
-    let mut best_length = current.length;
+    // Start with current parameters
     let mut current_points = vec![current.params];
-
-    // Track the best result overall
-    let mut best_result = current;
 
     for iteration in 0..max_iterations {
         debug!("\nIteration {}/{}", iteration + 1, max_iterations);
@@ -155,18 +154,23 @@ pub fn optimize_assembly(
                         tested_params.insert(new_params);
                         
                         let result = assemble_and_check(sequences, new_params, start_anchor, end_anchor, sequences.len())?;
-                        debug!("  Result - length: {}, has_anchors: {}", result.length, result.has_anchors);
-
+                        
+                        // If we found a solution with both anchors
                         if result.has_anchors {
-                            info!("Found solution at iteration {}!", iteration + 1);
-                            info!("Final parameters: k={}, min_coverage={}", new_params.k, new_params.min_coverage);
-                            return Ok(Some(result));
+                            match &best_with_anchors {
+                                None => {
+                                    info!("Found first solution with both anchors at iteration {}!", iteration + 1);
+                                    best_with_anchors = Some(result.clone());
+                                }
+                                Some(best) if result.length > best.length => {
+                                    info!("Found better solution with both anchors: {} > {}", result.length, best.length);
+                                    best_with_anchors = Some(result.clone());
+                                }
+                                _ => {}
+                            }
                         }
-
-                        if result.length > best_result.length {
-                            best_result = result.clone();
-                        }
-
+                        
+                        // Keep exploring from this point if it produced a contig
                         if !result.contig.is_empty() {
                             candidates.push(result);
                         }
@@ -184,45 +188,46 @@ pub fn optimize_assembly(
             break;
         }
 
-        // Find best length among new candidates
-        let max_length = candidates.iter()
-            .map(|r| r.length)
-            .max()
-            .unwrap();
+        // Update exploration points based on promising directions
+        // Prefer points that produced contigs with at least one anchor
+        let candidates_with_start: Vec<_> = candidates.iter()
+            .filter(|r| r.contig.contains(start_anchor) || r.contig.contains(end_anchor))
+            .collect();
 
-        if max_length > best_length {
-            // If we found better solutions, only keep those points
-            debug!("Found better length: {} > {}", max_length, best_length);
-            best_length = max_length;
+        if !candidates_with_start.is_empty() {
+            // If we found contigs with anchors, prefer those directions
+            current_points = candidates_with_start.iter()
+                .map(|r| r.params)
+                .collect();
+        } else {
+            // Otherwise, use length as a heuristic for promising directions
+            let max_length = candidates.iter()
+                .map(|r| r.length)
+                .max()
+                .unwrap();
+
             current_points = candidates.iter()
                 .filter(|r| r.length == max_length)
                 .map(|r| r.params)
                 .collect();
-            
-            debug!("New best points:");
-            for point in &current_points {
-                debug!("  k: {}, min_coverage: {}", point.k, point.min_coverage);
-            }
-        } else if max_length == best_length {
-            // If we found equal solutions, add those points
-            debug!("Found equal length solutions, adding to exploration points");
-            current_points.extend(
-                candidates.iter()
-                    .filter(|r| r.length == max_length)
-                    .map(|r| r.params)
-            );
-            debug!("Current exploration points:");
-            for point in &current_points {
-                debug!("  k: {}, min_coverage: {}", point.k, point.min_coverage);
-            }
         }
     }
     
-    info!("Optimization completed without finding anchors");
-    info!("Parameters tested: {}", tested_params.len());
-    info!("Best contig length found: {}", best_result.length);
+    info!("Optimization completed after testing {} parameter combinations", tested_params.len());
     
-    Ok(None) // Return None if no contig with both anchors was found
+    // Return the best result that had both anchors, if any
+    match best_with_anchors {
+        Some(result) => {
+            info!("Found valid solution with both anchors");
+            info!("Final parameters: k={}, min_coverage={}", result.params.k, result.params.min_coverage);
+            info!("Final contig length: {}", result.length);
+            Ok(Some(result))
+        }
+        None => {
+            info!("No valid contig found containing both anchor sequences");
+            Ok(None)
+        }
+    }
 }
 
 fn assemble_and_check(
