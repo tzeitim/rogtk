@@ -19,7 +19,7 @@ pub struct OptimizeParams {
 // Types module
 mod types {
     use log::debug;
-
+    
     #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
     pub struct ParamPoint {
         pub k: usize,
@@ -37,7 +37,6 @@ mod types {
 
     impl AssemblyResult {
         pub fn new(contig: String, k: usize, min_coverage: usize, start_anchor: &str, end_anchor: &str, input_sequences: usize) -> Self {
-            let length = contig.len();
             let has_start = contig.contains(start_anchor);
             let has_end = contig.contains(end_anchor);
             let has_anchors = has_start && has_end;
@@ -50,9 +49,9 @@ mod types {
             }
 
             Self {
-                contig,
+                contig: contig.clone(),
                 params: ParamPoint { k, min_coverage },
-                length: if has_anchors { length } else { 0 }, // Set length to 0 if anchors missing
+                length: contig.len(), // Keep actual length for optimization
                 has_anchors,
                 input_sequences,
             }
@@ -121,16 +120,6 @@ pub fn optimize_assembly(
     tested_params.insert(params);
     
     let current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequences.len())?;
-
-    // Return early if first attempt has no valid contigs
-    if current.length == 0 {
-        debug!("Initial assembly produced no valid contigs with both anchors");
-        return Ok(None);
-    }
-
-    debug!("Initial assembly result:");
-    debug!("  Contig length: {}", current.length);
-    debug!("  Has anchors: {}", current.has_anchors);
     
     if current.has_anchors {
         info!("Found solution on initial attempt!");
@@ -139,18 +128,12 @@ pub fn optimize_assembly(
 
     // Track current best length and all parameter points that achieved it
     let mut best_length = current.length;
-    let mut current_points = if best_length > 0 {
-        vec![current.params]
-    } else {
-        Vec::new()
-    };
+    let mut current_points = vec![current.params];
+
+    // Track the best result overall
+    let mut best_result = current;
 
     for iteration in 0..max_iterations {
-        if current_points.is_empty() {
-            info!("No valid parameter points to explore further");
-            break;
-        }
-
         debug!("\nIteration {}/{}", iteration + 1, max_iterations);
         let mut candidates = Vec::new();
         
@@ -172,19 +155,20 @@ pub fn optimize_assembly(
                         tested_params.insert(new_params);
                         
                         let result = assemble_and_check(sequences, new_params, start_anchor, end_anchor, sequences.len())?;
-                        
-                        // Only consider results with valid contigs
-                        if result.length > 0 {
-                            debug!("  Result - length: {}, has_anchors: {}", result.length, result.has_anchors);
-                            
-                            if result.has_anchors {
-                                info!("Found solution at iteration {}!", iteration + 1);
-                                info!("Final parameters: k={}, min_coverage={}", new_params.k, new_params.min_coverage);
-                                return Ok(Some(result));
-                            }
+                        debug!("  Result - length: {}, has_anchors: {}", result.length, result.has_anchors);
+
+                        if result.has_anchors {
+                            info!("Found solution at iteration {}!", iteration + 1);
+                            info!("Final parameters: k={}, min_coverage={}", new_params.k, new_params.min_coverage);
+                            return Ok(Some(result));
+                        }
+
+                        if result.length > best_result.length {
+                            best_result = result.clone();
+                        }
+
+                        if !result.contig.is_empty() {
                             candidates.push(result);
-                        } else {
-                            debug!("  Result - no valid contigs with both anchors");
                         }
                     } else {
                         debug!("Parameters already tested, skipping");
@@ -236,7 +220,9 @@ pub fn optimize_assembly(
     
     info!("Optimization completed without finding anchors");
     info!("Parameters tested: {}", tested_params.len());
-    Ok(None) // Return None if no valid contig with both anchors was found
+    info!("Best contig length found: {}", best_result.length);
+    
+    Ok(None) // Return None if no contig with both anchors was found
 }
 
 fn assemble_and_check(
@@ -252,7 +238,7 @@ fn assemble_and_check(
         sequences.to_vec(),
         params.k,
         params.min_coverage,
-        None,
+        Some(false), // don't export
         Some(true), // only_largest
         None,
         None,
@@ -275,18 +261,6 @@ fn assemble_and_check(
         end_anchor,
         input_sequences
     ))
-}
-
-fn output_type(input_fields: &[Field]) -> PolarsResult<Field> {
-    let fields = vec![
-        Field::new("contig".into(), DataType::String),
-        Field::new("k".into(), DataType::UInt32),
-        Field::new("min_coverage".into(), DataType::UInt32),
-        Field::new("length".into(), DataType::UInt32),
-        Field::new("input_sequences".into(), DataType::UInt32),
-    ];
-    let struct_type = DataType::Struct(fields);
-    Ok(Field::new(input_fields[0].name().clone(), struct_type))
 }
 
 #[polars_expr(output_type_func=output_type)]
@@ -347,4 +321,16 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
             Ok(df.into_struct(inputs[0].name().clone()).into())
         }
     }
+}
+
+fn output_type(input_fields: &[Field]) -> PolarsResult<Field> {
+    let fields = vec![
+        Field::new("contig".into(), DataType::String),
+        Field::new("k".into(), DataType::UInt32),
+        Field::new("min_coverage".into(), DataType::UInt32),
+        Field::new("length".into(), DataType::UInt32),
+        Field::new("input_sequences".into(), DataType::UInt32),
+    ];
+    let struct_type = DataType::Struct(fields);
+    Ok(Field::new(input_fields[0].name().clone(), struct_type))
 }
