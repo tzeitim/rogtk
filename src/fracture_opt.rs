@@ -231,7 +231,7 @@ fn assemble_and_check(
         sequences.to_vec(),
         params.k,
         params.min_coverage,
-        None,
+        Some(false), // don't export graphs
         Some(true), // only_largest
         None,
         None,
