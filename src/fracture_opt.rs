@@ -6,7 +6,6 @@ use pyo3_polars::derive::polars_expr;
 use crate::fracture::assemble_sequences;
 use log::*;
 
-
 #[derive(Deserialize)]
 pub struct OptimizeParams {
     pub start_k: usize,
@@ -19,7 +18,8 @@ pub struct OptimizeParams {
 
 // Types module
 mod types {
-    
+    use log::debug;
+
     #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
     pub struct ParamPoint {
         pub k: usize,
@@ -32,18 +32,27 @@ mod types {
         pub params: ParamPoint,
         pub length: usize,
         pub has_anchors: bool,
-        pub input_sequences: usize,  // Added field for input sequence count
+        pub input_sequences: usize,
     }
-
 
     impl AssemblyResult {
         pub fn new(contig: String, k: usize, min_coverage: usize, start_anchor: &str, end_anchor: &str, input_sequences: usize) -> Self {
             let length = contig.len();
-            let has_anchors = contig.contains(start_anchor) && contig.contains(end_anchor);
+            let has_start = contig.contains(start_anchor);
+            let has_end = contig.contains(end_anchor);
+            let has_anchors = has_start && has_end;
+
+            if !has_start {
+                debug!("Missing start anchor sequence");
+            }
+            if !has_end {
+                debug!("Missing end anchor sequence");
+            }
+
             Self {
                 contig,
                 params: ParamPoint { k, min_coverage },
-                length,
+                length: if has_anchors { length } else { 0 }, // Set length to 0 if anchors missing
                 has_anchors,
                 input_sequences,
             }
@@ -112,6 +121,13 @@ pub fn optimize_assembly(
     tested_params.insert(params);
     
     let current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequences.len())?;
+
+    // Return early if first attempt has no valid contigs
+    if current.length == 0 {
+        debug!("Initial assembly produced no valid contigs with both anchors");
+        return Ok(None);
+    }
+
     debug!("Initial assembly result:");
     debug!("  Contig length: {}", current.length);
     debug!("  Has anchors: {}", current.has_anchors);
@@ -123,9 +139,18 @@ pub fn optimize_assembly(
 
     // Track current best length and all parameter points that achieved it
     let mut best_length = current.length;
-    let mut current_points = vec![current.params];
-    
+    let mut current_points = if best_length > 0 {
+        vec![current.params]
+    } else {
+        Vec::new()
+    };
+
     for iteration in 0..max_iterations {
+        if current_points.is_empty() {
+            info!("No valid parameter points to explore further");
+            break;
+        }
+
         debug!("\nIteration {}/{}", iteration + 1, max_iterations);
         let mut candidates = Vec::new();
         
@@ -147,14 +172,20 @@ pub fn optimize_assembly(
                         tested_params.insert(new_params);
                         
                         let result = assemble_and_check(sequences, new_params, start_anchor, end_anchor, sequences.len())?;
-                        debug!("  Result - length: {}, has_anchors: {}", result.length, result.has_anchors);
                         
-                        if result.has_anchors {
-                            info!("Found solution at iteration {}!", iteration + 1);
-                            info!("Final parameters: k={}, min_coverage={}", new_params.k, new_params.min_coverage);
-                            return Ok(Some(result));
+                        // Only consider results with valid contigs
+                        if result.length > 0 {
+                            debug!("  Result - length: {}, has_anchors: {}", result.length, result.has_anchors);
+                            
+                            if result.has_anchors {
+                                info!("Found solution at iteration {}!", iteration + 1);
+                                info!("Final parameters: k={}, min_coverage={}", new_params.k, new_params.min_coverage);
+                                return Ok(Some(result));
+                            }
+                            candidates.push(result);
+                        } else {
+                            debug!("  Result - no valid contigs with both anchors");
                         }
-                        candidates.push(result);
                     } else {
                         debug!("Parameters already tested, skipping");
                     }
@@ -201,21 +232,11 @@ pub fn optimize_assembly(
                 debug!("  k: {}, min_coverage: {}", point.k, point.min_coverage);
             }
         }
-        // If max_length < best_length, we keep our current points and continue exploring from them
     }
     
     info!("Optimization completed without finding anchors");
     info!("Parameters tested: {}", tested_params.len());
-    info!("Best result: length={}", best_length);
-    info!("Best points:");
-    for point in &current_points {
-        info!("  k={}, min_coverage={}", point.k, point.min_coverage);
-    }
-    
-    // Return result with parameters from first current point
-    // (all points have same length at this point)
-    let final_result = assemble_and_check(sequences, current_points[0], start_anchor, end_anchor, sequences.len())?;
-    Ok(Some(final_result))
+    Ok(None) // Return None if no valid contig with both anchors was found
 }
 
 fn assemble_and_check(
@@ -231,7 +252,7 @@ fn assemble_and_check(
         sequences.to_vec(),
         params.k,
         params.min_coverage,
-        Some(false), // don't export graphs
+        None,
         Some(true), // only_largest
         None,
         None,
@@ -254,6 +275,18 @@ fn assemble_and_check(
         end_anchor,
         input_sequences
     ))
+}
+
+fn output_type(input_fields: &[Field]) -> PolarsResult<Field> {
+    let fields = vec![
+        Field::new("contig".into(), DataType::String),
+        Field::new("k".into(), DataType::UInt32),
+        Field::new("min_coverage".into(), DataType::UInt32),
+        Field::new("length".into(), DataType::UInt32),
+        Field::new("input_sequences".into(), DataType::UInt32),
+    ];
+    let struct_type = DataType::Struct(fields);
+    Ok(Field::new(input_fields[0].name().clone(), struct_type))
 }
 
 #[polars_expr(output_type_func=output_type)]
@@ -300,8 +333,8 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
             
             Ok(df.into_struct(inputs[0].name().clone()).into())
         },
-        Ok(None) => {
-            info!("Optimization completed without finding anchors");
+        Ok(None) | Err(_) => {
+            info!("No valid contig found with both anchor sequences");
             
             let df = DataFrame::new(vec![
                 Series::new("contig".into(), vec!["" as &str]),
@@ -312,24 +345,6 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
             ])?;
             
             Ok(df.into_struct(inputs[0].name().clone()).into())
-        },
-        Err(e) => {
-            error!("Assembly optimization failed: {}", e);
-            Err(PolarsError::ComputeError(
-                format!("Assembly optimization failed: {}", e).into()
-            ))
-        },
+        }
     }
-}
-
-fn output_type(input_fields: &[Field]) -> PolarsResult<Field> {
-    let fields = vec![
-        Field::new("contig".into(), DataType::String),
-        Field::new("k".into(), DataType::UInt32),
-        Field::new("min_coverage".into(), DataType::UInt32),
-        Field::new("length".into(), DataType::UInt32),
-        Field::new("input_sequences".into(), DataType::UInt32),
-    ];
-    let struct_type = DataType::Struct(fields);
-    Ok(Field::new(input_fields[0].name().clone(), struct_type))
 }
