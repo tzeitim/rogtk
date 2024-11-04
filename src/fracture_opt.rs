@@ -16,7 +16,6 @@ pub struct OptimizeParams {
     pub explore_k: Option<bool>,
 }
 
-// Types module
 mod types {
     use log::debug;
     
@@ -214,15 +213,11 @@ fn select_promising_paths(mut paths: Vec<ExplorationPath>) -> Vec<ExplorationPat
     });
 
     // Keep top N paths (adjust N based on desired exploration breadth)
-    const MAX_ACTIVE_PATHS: usize = 3;
+    const MAX_ACTIVE_PATHS: usize = 4;
     paths.truncate(MAX_ACTIVE_PATHS);
-
-    // Drop paths that haven't improved in too many steps
-    //paths.retain(|path| path.steps_without_improvement < 5);
-
     paths
 }
-// Helper function remains largely the same but with improved logging
+
 fn assemble_and_check(
     sequences: &[String], 
     params: ParamPoint,
