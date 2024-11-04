@@ -101,6 +101,14 @@ mod types {
 
 use types::*;
 
+#[derive(Debug, Clone)]
+struct ExplorationPath {
+    params: ParamPoint,
+    length: usize,
+    steps_without_improvement: usize,
+    direction_history: Vec<Direction>,
+}
+
 pub fn optimize_assembly(
     sequences: &[String],
     params: ParamPoint,
@@ -109,127 +117,112 @@ pub fn optimize_assembly(
     max_iterations: usize,
     explore_k: bool,
 ) -> Result<Option<AssemblyResult>> {
-    info!("Starting assembly optimization with:");
-    info!("  Initial k: {}, min_coverage: {}", params.k, params.min_coverage);
-    info!("  Max iterations: {}, explore_k: {}", max_iterations, explore_k);
-    info!("  Start anchor: {}", start_anchor);
-    info!("  End anchor: {}", end_anchor);
-    info!("  Number of input sequences: {}", sequences.len());
-
     let mut tested_params = HashSet::new();
     tested_params.insert(params);
-    
-    let current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequences.len())?;
-    
-    // Track best result that has both anchors
-    let mut best_with_anchors: Option<AssemblyResult> = if current.has_anchors {
-        info!("Found initial solution!");
-        Some(current.clone())
-    } else {
-        None
-    };
 
-    // Start with current parameters
-    let mut current_points = vec![current.params];
+    // Get initial result
+    let current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequences.len())?;
+    if current.has_anchors {
+        return Ok(Some(current));
+    }
+
+    // Initialize multiple exploration paths
+    let mut paths = vec![ExplorationPath {
+        params: current.params,
+        length: current.length,
+        steps_without_improvement: 0,
+        direction_history: Vec::new(),
+    }];
+
+    let directions = if explore_k {
+        vec![Direction::West, Direction::East, Direction::North, Direction::South]
+    } else {
+        vec![Direction::West, Direction::East]
+    };
 
     for iteration in 0..max_iterations {
         debug!("\nIteration {}/{}", iteration + 1, max_iterations);
-        let mut candidates = Vec::new();
-        
-        let directions = if explore_k {
-            vec![Direction::West, Direction::East, Direction::North, Direction::South]
-        } else {
-            vec![Direction::West, Direction::East]
-        };
-        
-        // Try all directions from all current points
-        for &point in &current_points {
-            debug!("Exploring from point k={}, min_coverage={}", point.k, point.min_coverage);
-            
+        let mut new_paths = Vec::new();
+
+        // Explore from each active path
+        for path in &paths {
+            debug!("Exploring from point k={}, min_coverage={}", 
+                  path.params.k, path.params.min_coverage);
+
+            // Try all directions from current path
             for direction in &directions {
-                debug!("Trying direction: {:?}", direction);
-                if let Some(new_params) = direction.apply(point) {
+                if let Some(new_params) = direction.apply(path.params) {
                     if !tested_params.contains(&new_params) {
-                        debug!("Testing new params - k: {}, min_coverage: {}", new_params.k, new_params.min_coverage);
                         tested_params.insert(new_params);
                         
-                        let result = assemble_and_check(sequences, new_params, start_anchor, end_anchor, sequences.len())?;
-                        
-                        // If we found a solution with both anchors
+                        let result = assemble_and_check(
+                            sequences, new_params, start_anchor, end_anchor, sequences.len()
+                        )?;
+
+                        // If solution found, return immediately
                         if result.has_anchors {
-                            match &best_with_anchors {
-                                None => {
-                                    info!("Found first solution with both anchors at iteration {}!", iteration + 1);
-                                    best_with_anchors = Some(result.clone());
-                                }
-                                Some(best) if result.length > best.length => {
-                                    info!("Found better solution with both anchors: {} > {}", result.length, best.length);
-                                    best_with_anchors = Some(result.clone());
-                                }
-                                _ => {}
-                            }
+                            info!("Found solution with both anchors at iteration {}!", iteration + 1);
+                            return Ok(Some(result));
                         }
-                        
-                        // Keep exploring from this point if it produced a contig
+
+                        // Create new path if result is promising
                         if !result.contig.is_empty() {
-                            candidates.push(result);
+                            let mut new_direction_history = path.direction_history.clone();
+                            new_direction_history.push(*direction);
+
+                            let steps_without_improvement = 
+                                if result.length > path.length { 0 } else { path.steps_without_improvement + 1 };
+
+                            new_paths.push(ExplorationPath {
+                                params: new_params,
+                                length: result.length,
+                                steps_without_improvement,
+                                direction_history: new_direction_history,
+                            });
                         }
-                    } else {
-                        debug!("Parameters already tested, skipping");
                     }
-                } else {
-                    debug!("Invalid parameters for direction {:?}, skipping", direction);
                 }
             }
         }
-        
-        if candidates.is_empty() {
+
+        if new_paths.is_empty() {
             info!("No more valid parameter combinations to try");
             break;
         }
 
-        // Update exploration points based on promising directions
-        // Prefer points that produced contigs with at least one anchor
-        let candidates_with_start: Vec<_> = candidates.iter()
-            .filter(|r| r.contig.contains(start_anchor) || r.contig.contains(end_anchor))
-            .collect();
+        // Select most promising paths to continue exploration
+        paths = select_promising_paths(new_paths);
 
-        if !candidates_with_start.is_empty() {
-            // If we found contigs with anchors, prefer those directions
-            current_points = candidates_with_start.iter()
-                .map(|r| r.params)
-                .collect();
-        } else {
-            // Otherwise, use length as a heuristic for promising directions
-            let max_length = candidates.iter()
-                .map(|r| r.length)
-                .max()
-                .unwrap();
-
-            current_points = candidates.iter()
-                .filter(|r| r.length == max_length)
-                .map(|r| r.params)
-                .collect();
+        // Log current exploration state
+        debug!("Active exploration paths:");
+        for path in &paths {
+            debug!("  k={}, min_coverage={}, length={}, steps_without_improvement={}", 
+                  path.params.k, path.params.min_coverage, path.length, path.steps_without_improvement);
         }
     }
-    
+
     info!("Optimization completed after testing {} parameter combinations", tested_params.len());
-    
-    // Return the best result that had both anchors, if any
-    match best_with_anchors {
-        Some(result) => {
-            info!("Found valid solution with both anchors");
-            info!("Final parameters: k={}, min_coverage={}", result.params.k, result.params.min_coverage);
-            info!("Final contig length: {}", result.length);
-            Ok(Some(result))
-        }
-        None => {
-            info!("No valid contig found containing both anchor sequences");
-            Ok(None)
-        }
-    }
+    info!("No solution found containing both anchor sequences");
+    Ok(None)
 }
 
+fn select_promising_paths(mut paths: Vec<ExplorationPath>) -> Vec<ExplorationPath> {
+    // Sort paths by length and recency of improvement
+    paths.sort_by(|a, b| {
+        b.length.cmp(&a.length)
+            .then(a.steps_without_improvement.cmp(&b.steps_without_improvement))
+    });
+
+    // Keep top N paths (adjust N based on desired exploration breadth)
+    const MAX_ACTIVE_PATHS: usize = 3;
+    paths.truncate(MAX_ACTIVE_PATHS);
+
+    // Drop paths that haven't improved in too many steps
+    //paths.retain(|path| path.steps_without_improvement < 5);
+
+    paths
+}
+// Helper function remains largely the same but with improved logging
 fn assemble_and_check(
     sequences: &[String], 
     params: ParamPoint,
@@ -244,7 +237,7 @@ fn assemble_and_check(
         params.k,
         params.min_coverage,
         Some(false), // don't export
-        Some(true), // only_largest
+        Some(true),  // only_largest
         None,
         None,
         None,
@@ -254,7 +247,8 @@ fn assemble_and_check(
         debug!("No contigs produced");
         String::new()
     } else {
-        debug!("Produced contig of length {}", contigs[0].len());
+        let length = contigs[0].len();
+        debug!("Produced contig of length {}", length);
         contigs[0].clone()
     };
     
@@ -267,7 +261,6 @@ fn assemble_and_check(
         input_sequences
     ))
 }
-
 #[polars_expr(output_type_func=output_type)]
 pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> PolarsResult<Series> {
     let _ = env_logger::try_init();
