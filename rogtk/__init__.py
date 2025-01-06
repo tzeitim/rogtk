@@ -152,7 +152,6 @@ def sweep_assembly_params(
         is_elementwise=False,
     )
 
-
 def optimize_assembly(
     expr: IntoExpr,
     start_k: int,
@@ -160,37 +159,9 @@ def optimize_assembly(
     start_anchor: str,
     end_anchor: str,
     max_iterations: int | None = None,
-    explore_k: bool | None = None
+    explore_k: bool | None = None,
+    prioritize_length: bool | None = None,
 ) -> pl.Expr:
-    """
-    Optimize assembly parameters by exploring parameter space until anchors are found.
-    
-    Parameters
-    ----------
-    expr : IntoExpr
-        Input expression containing sequences to assemble
-    start_k : int
-        Initial k-mer size
-    start_min_coverage : int
-        Initial minimum coverage threshold
-    start_anchor : str
-        Sequence that should appear at start of contig
-    end_anchor : str
-        Sequence that should appear at end of contig
-    max_iterations : int, optional
-        Maximum optimization iterations, defaults to 50
-    explore_k : bool, optional
-        Whether to explore k-mer size variations, defaults to False
-        
-    Returns
-    -------
-    pl.Expr
-        Expression containing optimized assembly result with fields:
-        - contig: str
-        - k: int
-        - min_coverage: int
-        - length: int
-    """
     return register_plugin_function(
         plugin_path=Path(__file__).parent,
         function_name="optimize_assembly_expr",
@@ -201,7 +172,8 @@ def optimize_assembly(
             "start_anchor": start_anchor,
             "end_anchor": end_anchor,
             "max_iterations": max_iterations,
-            "explore_k": explore_k
+            "explore_k": explore_k,
+            "prioritize_length": prioritize_length
         },
         returns_scalar=True,
         is_elementwise=False,
