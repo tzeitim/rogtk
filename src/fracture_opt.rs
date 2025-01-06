@@ -14,6 +14,8 @@ pub struct OptimizeParams {
     pub end_anchor: String,
     pub max_iterations: Option<usize>,
     pub explore_k: Option<bool>,
+    pub prioritize_length: Option<bool>,
+
 }
 
 mod types {
@@ -115,17 +117,27 @@ pub fn optimize_assembly(
     end_anchor: &str,
     max_iterations: usize,
     explore_k: bool,
+    prioritize_length: bool,
 ) -> Result<Option<AssemblyResult>> {
     let mut tested_params = HashSet::new();
     tested_params.insert(params);
 
+    // Track best results
+    let mut best_anchored_result: Option<AssemblyResult> = None;
+    let mut best_length_result: Option<AssemblyResult> = None;
+
     // Get initial result
     let current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequences.len())?;
+    
+    // Update best results
     if current.has_anchors {
-        return Ok(Some(current));
+        best_anchored_result = Some(current.clone());
+    }
+    if best_length_result.as_ref().map_or(true, |r| current.length > r.length) {
+        best_length_result = Some(current.clone());
     }
 
-    // Initialize multiple exploration paths
+    // Initialize paths for exploration
     let mut paths = vec![ExplorationPath {
         params: current.params,
         length: current.length,
@@ -143,12 +155,10 @@ pub fn optimize_assembly(
         debug!("\nIteration {}/{}", iteration + 1, max_iterations);
         let mut new_paths = Vec::new();
 
-        // Explore from each active path
         for path in &paths {
             debug!("Exploring from point k={}, min_coverage={}", 
                   path.params.k, path.params.min_coverage);
 
-            // Try all directions from current path
             for direction in &directions {
                 if let Some(new_params) = direction.apply(path.params) {
                     if !tested_params.contains(&new_params) {
@@ -158,8 +168,16 @@ pub fn optimize_assembly(
                             sequences, new_params, start_anchor, end_anchor, sequences.len()
                         )?;
 
-                        // If solution found, return immediately
-                        if result.has_anchors {
+                        // Update best results
+                        if result.has_anchors && best_anchored_result.as_ref().map_or(true, |r| result.length > r.length) {
+                            best_anchored_result = Some(result.clone());
+                        }
+                        if best_length_result.as_ref().map_or(true, |r| result.length > r.length) {
+                            best_length_result = Some(result.clone());
+                        }
+
+                        // Early return if we find anchored solution and aren't prioritizing length
+                        if result.has_anchors && !prioritize_length {
                             info!("Found solution with both anchors at iteration {}!", iteration + 1);
                             return Ok(Some(result));
                         }
@@ -185,24 +203,20 @@ pub fn optimize_assembly(
         }
 
         if new_paths.is_empty() {
-            info!("No more valid parameter combinations to try");
             break;
         }
 
-        // Select most promising paths to continue exploration
         paths = select_promising_paths(new_paths);
-
-        // Log current exploration state
-        debug!("Active exploration paths:");
-        for path in &paths {
-            debug!("  k={}, min_coverage={}, length={}, steps_without_improvement={}", 
-                  path.params.k, path.params.min_coverage, path.length, path.steps_without_improvement);
-        }
     }
 
-    info!("Optimization completed after testing {} parameter combinations", tested_params.len());
-    info!("No solution found containing both anchor sequences");
-    Ok(None)
+    // Return best result based on priority
+    if prioritize_length {
+        info!("Optimization completed, returning longest contig");
+        Ok(best_length_result)
+    } else {
+        info!("Optimization completed, returning best anchored contig");
+        Ok(best_anchored_result)
+    }
 }
 
 fn select_promising_paths(mut paths: Vec<ExplorationPath>) -> Vec<ExplorationPath> {
@@ -269,6 +283,7 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
     let sequence_count = sequences.len();
     let max_iterations = kwargs.max_iterations.unwrap_or(50);
     let explore_k = kwargs.explore_k.unwrap_or(false);
+    let prioritize_length = kwargs.prioritize_length.unwrap_or(false);
     
     let start_params = ParamPoint {
         k: kwargs.start_k,
@@ -285,6 +300,7 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
         &kwargs.end_anchor,
         max_iterations,
         explore_k,
+        prioritize_length,
     ) {
         Ok(Some(result)) => {
             info!("Optimization successful");
@@ -301,7 +317,7 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
             Ok(df.into_struct(inputs[0].name().clone()).into())
         },
         Ok(None) | Err(_) => {
-            info!("No valid contig found with both anchor sequences");
+            info!("No valid contig found");
             
             let df = DataFrame::new(vec![
                 Series::new("contig".into(), vec!["" as &str]),
@@ -315,7 +331,6 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
         }
     }
 }
-
 fn output_type(input_fields: &[Field]) -> PolarsResult<Field> {
     let fields = vec![
         Field::new("contig".into(), DataType::String),
