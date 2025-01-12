@@ -217,11 +217,15 @@ pub fn assemble_with_path_finding<K: Kmer + Send + Sync + Debug + 'static>(
         let sequences = extract_path_sequences(&pg, &path);
         let mean_coverage = 1.0 / (total_weight / path.len() as f64);
         
+        info!("Found path with total weight {} and mean coverage {}", 
+              total_weight, mean_coverage);
+        
         Ok(PathFindingResult {
             path: sequences,
             total_weight,
             mean_coverage,
         })
+
     } else {
         Err("No valid path found between anchors".to_string())
     }

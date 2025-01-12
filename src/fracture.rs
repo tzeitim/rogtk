@@ -374,14 +374,34 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
             Ok(contigs)
         },
         AssemblyMethod::ShortestPath { start_anchor, end_anchor } => {
-            match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor) {
-                Ok(result) => Ok(result.path),
-                Err(e) => {
-                    warn!("Path finding failed: {}", e);
-                    Ok(Vec::new())
+        // Export preliminary graph if enabled
+        if should_export {
+            let prelim_path = format!("{}_preliminary.dot", prefix);
+            export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
+            info!("Exported preliminary graph to {}", prelim_path);
+        }
+
+        info!("Starting path finding assembly with anchors: {} -> {}", start_anchor, end_anchor);
+        
+        match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor) {
+            Ok(result) => {
+                info!("Path finding succeeded - found path of {} nodes", result.path.len());
+                
+                // Export result graph if enabled
+                if should_export {
+                    let path_path = format!("{}_path.dot", prefix);
+                    export_graph(&preliminary_graph, &path_path, "Path Finding ")?;
+                    info!("Exported path-finding graph to {}", path_path);
                 }
+                
+                Ok(result.path)
+            },
+            Err(e) => {
+                error!("Path finding failed: {}", e);
+                Err(anyhow::anyhow!("Path finding assembly failed: {}", e))
             }
         }
+    }
     }
 }
 
@@ -526,31 +546,37 @@ mod tests {
         }
     }
     // Helper function to create a simple test graph
-    fn create_test_sequences() -> Vec<String> {
+        fn create_test_sequences() -> Vec<String> {
         vec![
-            "GAGACTGCATGGAAAA".to_string(),
-            "AAAACCCCCAAAAA".to_string(),
-            "AAAAATTTAGTGAGGGT".to_string(),
+            // Start sequence containing the start anchor
+            "GAGACTGCATGGGCTGGTGGGCGTCCGTCTGCATTCTGCTCGCACTGCACGACAGTCGATGGAGTCGCGAGCGCTTTGAGCGACTAAGGAGTCGATACGATACGGGCACGCTATGGAGTCGAGAGCGCGCTCCTCC".to_string(),
+            // Middle sequences to bridge the gap
+            "GCATGGTTCGAAAACC".to_string(),
+            "AAAAACCCCCAAAAA".to_string(),
+            "CCCCCAAAAATTTAGTG".to_string(),
+            // End sequence containing the end anchor
+            "GGAGACGCGACTGTACGCAGACGCGACGGAGTCGATAGTATGCGTACTCGCGATGGTGTCGAGTCGAGACGCTGAGGATAGGGAGTCGATACGTAGCATGCGATGGACGCGCATCCAAATCGAGCACTTTAGTGAGGGT".to_string(),
         ]
     }
+
 
     #[test]
     fn test_full_assembly_with_path_finding() {
         let sequences = create_test_sequences();
         
-        let result = assemble_sequences(
+        let result= assemble_sequences(
             sequences,
-            4, // Small k-mer size for test
-            1, // Min coverage
+            13, //kmersize
+            1, // min_cov
             AssemblyMethod::ShortestPath {
                 start_anchor: "GAGACTGCATGG".to_string(),
                 end_anchor: "TTTAGTGAGGGT".to_string(),
             },
-            Some(false), // Don't export graphs
-            None,
-            None,
-            None,
-            Some("prefix".to_string()),
+            Some(true), // export graphs
+            None,// only largest
+            None, // min_len
+            Some(false),//auto_k
+            Some("test_prefix".to_string()),
         );
         
         assert!(result.is_ok(), "Assembly should succeed");
@@ -609,18 +635,29 @@ mod tests {
         );
         
         // Test path finding method
+        //
+        //pub fn assemble_sequences(
+        //    sequences: Vec<String>, 
+        //    k: usize, 
+        //    min_coverage: usize, 
+        //    method: AssemblyMethod, 
+        //    export_graphs: Option<bool>,
+        //    only_largest: Option<bool>,
+        //    min_length: Option<usize>,
+        //    auto_k: Option<bool>,
+        //    prefix: Option<String>,
         let path_finding_result = assemble_sequences(
             sequences,
-            4,
-            1,
+            4, //kmersize
+            1, // min_cov
             AssemblyMethod::ShortestPath {
                 start_anchor: "GAGACTGCATGG".to_string(),
                 end_anchor: "TTTAGTGAGGGT".to_string(),
             },
-            Some(false),
-            None,
-            None,
-            None,
+            Some(false), // export graphs
+            None,// only largest
+            None, // min_len
+            Some(false),//auto_k
             Some("prefix".to_string()),
         );
         
