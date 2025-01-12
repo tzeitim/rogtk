@@ -4,6 +4,7 @@ use serde::Deserialize;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use crate::fracture::assemble_sequences;
+use crate::djfind::AssemblyMethod;
 use log::*;
 
 #[derive(Deserialize)]
@@ -15,6 +16,7 @@ pub struct OptimizeParams {
     pub max_iterations: Option<usize>,
     pub explore_k: Option<bool>,
     pub prioritize_length: Option<bool>,
+    pub method: AssemblyMethod,
 
 }
 
@@ -118,6 +120,7 @@ pub fn optimize_assembly(
     max_iterations: usize,
     explore_k: bool,
     prioritize_length: bool,
+    method: AssemblyMethod,
 ) -> Result<Option<AssemblyResult>> {
     let mut tested_params = HashSet::new();
     tested_params.insert(params);
@@ -127,7 +130,7 @@ pub fn optimize_assembly(
     let mut best_length_result: Option<AssemblyResult> = None;
 
     // Get initial result
-    let current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequences.len())?;
+    let current = assemble_and_check(sequences, params, start_anchor, end_anchor, sequences.len(), method.clone())?;
     
     // Update best results
     if current.has_anchors {
@@ -165,8 +168,7 @@ pub fn optimize_assembly(
                         tested_params.insert(new_params);
                         
                         let result = assemble_and_check(
-                            sequences, new_params, start_anchor, end_anchor, sequences.len()
-                        )?;
+                            sequences, new_params, start_anchor, end_anchor, sequences.len(), method.clone())?;
 
                         // Update best results
                         if result.has_anchors && best_anchored_result.as_ref().map_or(true, |r| result.length > r.length) {
@@ -238,6 +240,7 @@ fn assemble_and_check(
     start_anchor: &str,
     end_anchor: &str,
     input_sequences: usize,
+    method: AssemblyMethod,
 ) -> Result<AssemblyResult> {
     debug!("Attempting assembly with k={}, min_coverage={}", params.k, params.min_coverage);
     
@@ -245,6 +248,7 @@ fn assemble_and_check(
         sequences.to_vec(),
         params.k,
         params.min_coverage,
+        method,
         Some(false), // don't export
         Some(true),  // only_largest
         None,
@@ -301,6 +305,7 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
         max_iterations,
         explore_k,
         prioritize_length,
+        kwargs.method,
     ) {
         Ok(Some(result)) => {
             info!("Optimization successful");

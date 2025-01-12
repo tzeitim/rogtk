@@ -2,6 +2,8 @@ use serde::Deserialize;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
 use crate::fracture::assemble_sequences;
+use crate::djfind::AssemblyMethod;
+
 //use crate::fracture_opt::optimize_assembly;
 
 fn parse_cigar_str(cigar: &str, output: &mut String, block_dels: bool) {
@@ -229,6 +231,7 @@ struct AssemblyKwargs {
     min_coverage: usize,
     export_graphs: Option<bool>,
     min_length: Option<usize>,
+    method: AssemblyMethod,
     auto_k: Option<bool>,
     prefix: Option<String>,
 }
@@ -255,6 +258,7 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
         sequences,
         kwargs.k,
         kwargs.min_coverage,
+        kwargs.method,
         kwargs.export_graphs,
         Some(true), // Hardcoded to true
         kwargs.min_length,
@@ -291,6 +295,7 @@ struct SweepParams {
     cov_start: usize,
     cov_end: usize, 
     cov_step: usize,
+    method: AssemblyMethod,
     export_graphs: Option<bool>,
     prefix: Option<String>
 }
@@ -325,10 +330,25 @@ fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsR
     for k in (kwargs.k_start..=kwargs.k_end).step_by(kwargs.k_step) {
         for min_cov in (kwargs.cov_start..=kwargs.cov_end).step_by(kwargs.cov_step) {
             // Run assembly with current parameters
+//pub fn assemble_sequences(
+//    sequences: Vec<String>, 
+//    k: usize, 
+//    min_coverage: usize, 
+//    method: AssemblyMethod, 
+//    export_graphs: Option<bool>,
+//    only_largest: Option<bool>,
+//    min_length: Option<usize>,
+//    auto_k: Option<bool>,
+//    prefix: Option<String>,
+            //
             match assemble_sequences(
                 sequences.clone(),
                 k,
                 min_cov,
+                // TODO: Optimize by using references to AssemblyMethod instead of cloning.
+                // This would require updating function signatures across the codebase 
+                // to accept &AssemblyMethod instead of AssemblyMethod.
+                kwargs.method.clone(),
                 kwargs.export_graphs,
                 Some(true),
                 None,

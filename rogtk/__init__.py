@@ -43,6 +43,7 @@ def assemble_sequences(
     expr: IntoExpr,
     k: int = 31,
     min_coverage: int = 1,
+    method: 'compression',
     export_graphs: bool = False,
     only_largest: bool = False,
     min_length: int | None = None,

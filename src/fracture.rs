@@ -15,6 +15,8 @@ use anyhow::Result;
 use std::fmt::Debug;
 
 use crate::graph_viz::export_graph;
+use crate::djfind::*;
+
 
 fn estimate_k(sequences: &[String]) -> usize {
     // Safety checks
@@ -183,6 +185,7 @@ pub fn assemble_sequences(
     sequences: Vec<String>, 
     k: usize, 
     min_coverage: usize, 
+    method: AssemblyMethod, 
     export_graphs: Option<bool>,
     only_largest: Option<bool>,
     min_length: Option<usize>,
@@ -235,11 +238,11 @@ pub fn assemble_sequences(
     let prefix = prefix.unwrap_or_else(|| "assembly".to_string());
     
     let contigs = match k {
-        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, &prefix, export_graphs),
-        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, &prefix, export_graphs),
-        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, &prefix, export_graphs),
-        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, &prefix, export_graphs), 
-        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, &prefix, export_graphs),
+        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, &prefix, method, export_graphs),
+        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, &prefix, method, export_graphs),
+        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, &prefix, method, export_graphs),
+        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, &prefix, method, export_graphs), 
+        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, &prefix, method, export_graphs),
         _ => {
             error!("K-mer size {} not supported. Please use k <= 64", k);
             Ok(Vec::new())
@@ -270,7 +273,7 @@ pub fn assemble_sequences(
     }
 }
 
-pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize, export_graphs: Option<bool>) -> Result<Vec<String>> {
+pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize, method: AssemblyMethod, export_graphs: Option<bool>) -> Result<Vec<String>> {
     info!("Starting assembly of {} with k={}, min_coverage={}", 
           fasta_path.display(), k, min_coverage);
     
@@ -299,11 +302,11 @@ pub fn assemble_fasta(fasta_path: &Path, k: usize, min_coverage: usize, export_g
         .unwrap_or("assembly");
     
     match k {
-        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, prefix, export_graphs),
-        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, prefix, export_graphs),
-        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, prefix, export_graphs),
-        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, prefix, export_graphs), 
-        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, prefix, export_graphs),
+        k if k <= 4 => assemble_with_k::<Kmer4>(&seq_tuples, min_coverage, prefix, method, export_graphs),
+        k if k <= 8 => assemble_with_k::<Kmer8>(&seq_tuples, min_coverage, prefix, method, export_graphs),
+        k if k <= 16 => assemble_with_k::<Kmer16>(&seq_tuples, min_coverage, prefix, method, export_graphs),
+        k if k <= 32 => assemble_with_k::<Kmer32>(&seq_tuples, min_coverage, prefix, method, export_graphs), 
+        k if k <= 64 => assemble_with_k::<Kmer64>(&seq_tuples, min_coverage, prefix, method, export_graphs),
         _ => {
             error!("K-mer size {} not supported. Please use k <= 64", k);
             Ok(Vec::new())
@@ -315,6 +318,7 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
     seq_tuples: &[(DnaString, Exts, ())],
     min_coverage: usize,
     prefix: &str,
+    method: AssemblyMethod,
     export_graphs: Option<bool>,
 ) -> Result<Vec<String>> {
     let should_export = export_graphs.unwrap_or(true);
@@ -335,58 +339,76 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
         preliminary_graph.add(&kmer_bytes, *exts, *count);
     }
     let preliminary_graph = preliminary_graph.finish();
+    match method {
+        AssemblyMethod::Compression => {
+            // Export uncompressed preliminary graph if enabled
+            if should_export {
+                let prelim_path = format!("{}_preliminary.dot", prefix);
+                export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
+                info!("Exported preliminary graph to {}", prelim_path);
+            }
 
-    // Export uncompressed preliminary graph if enabled
-    if should_export {
-        let prelim_path = format!("{}_preliminary.dot", prefix);
-        export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
-        info!("Exported preliminary graph to {}", prelim_path);
-    }
+            // Build compressed graph
+            let compressed_graph = {
+                let spec = SimpleCompress::new(|d1: u16, d2: &u16| d1.saturating_add(*d2));
+                compress_graph(true, &spec, preliminary_graph, None)
+            };
 
-    // Build compressed graph
-    let compressed_graph = {
-        let spec = SimpleCompress::new(|d1: u16, d2: &u16| d1.saturating_add(*d2));
-        compress_graph(true, &spec, preliminary_graph, None)
-    };
+            // Export compressed graph if enabled
+            if should_export {
+                let comp_path = format!("{}_compressed.dot", prefix);
+                export_graph(&compressed_graph, &comp_path, "Compressed")?;
+                info!("Exported compressed graph to {}", comp_path);
+            }
 
-    // Export compressed graph if enabled
-    if should_export {
-        let comp_path = format!("{}_compressed.dot", prefix);
-        export_graph(&compressed_graph, &comp_path, "Compressed")?;
-        info!("Exported compressed graph to {}", comp_path);
-    }
+            // Extract contigs from compressed graph
+            let mut contigs = Vec::new();
+            for node in compressed_graph.iter_nodes() {
+                let seq = node.sequence();
+                if seq.len() >= K::k() {
+                    contigs.push(seq.to_string());
+                }
+            }
 
-    // Extract contigs from compressed graph
-    let mut contigs = Vec::new();
-    for node in compressed_graph.iter_nodes() {
-        let seq = node.sequence();
-        if seq.len() >= K::k() {
-            contigs.push(seq.to_string());
+            info!("Assembly complete. Found {} contigs", contigs.len());
+            Ok(contigs)
+        },
+        AssemblyMethod::ShortestPath { start_anchor, end_anchor } => {
+            match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor) {
+                Ok(result) => Ok(result.path),
+                Err(e) => {
+                    warn!("Path finding failed: {}", e);
+                    Ok(Vec::new())
+                }
+            }
         }
     }
-
-    info!("Assembly complete. Found {} contigs", contigs.len());
-    Ok(contigs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (fasta_path, k, min_coverage, min_length=200, export_graphs=None))]
+#[pyo3(signature = (fasta_path, k, min_coverage, min_length=200, method="compression", start_anchor=None, end_anchor=None, export_graphs=None))]
 pub fn fracture_fasta(
     fasta_path: String, 
     k: usize, 
     min_coverage: usize,
     min_length: Option<usize>,
+    method: &str,
+    start_anchor: Option<String>,
+    end_anchor: Option<String>,
     export_graphs: Option<bool>
 ) -> PyResult<String> {
     // Initialize logger
     //env_logger::init();
     let _ = env_logger::try_init();
-    
+
+    let assembly_method = AssemblyMethod::from_str(&method, start_anchor, end_anchor)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+ 
     // Use provided min_length or default to 200
     let min_length = min_length.unwrap_or(200);
     
     // Perform assembly
-    let contigs = assemble_fasta(Path::new(&fasta_path), k, min_coverage, export_graphs)
+    let contigs = assemble_fasta(Path::new(&fasta_path), k, min_coverage, assembly_method, export_graphs)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     
     // Find the largest contig
@@ -402,7 +424,7 @@ pub fn fracture_fasta(
 }
 
 #[pyfunction]
-#[pyo3(signature = (sequences, k, min_coverage, min_length=200, export_graphs=None, only_largest=None, auto_k=None, prefix=None))]
+#[pyo3(signature = (sequences, k, min_coverage, min_length=200, method="compression", start_anchor=None, end_anchor=None, export_graphs=None, only_largest=None, auto_k=None, prefix=None))]
 /// Assemble sequences using a de Bruijn graph approach
 /// 
 /// Args:
@@ -423,6 +445,9 @@ pub fn fracture_sequences(
     k: usize, 
     min_coverage: usize,
     min_length: Option<usize>,
+    method: &str,
+    start_anchor: Option<String>,
+    end_anchor: Option<String>,
     export_graphs: Option<bool>,
     only_largest: Option<bool>,
     auto_k: Option<bool>,
@@ -430,12 +455,16 @@ pub fn fracture_sequences(
 ) -> PyResult<String> {
     // Try to initialize logger, ignore if already initialized
     let _ = env_logger::try_init();
-    
+
+    let assembly_method = AssemblyMethod::from_str(&method, start_anchor, end_anchor)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?; 
+
     // Perform assembly
     let contigs = assemble_sequences(
         sequences, 
         k, 
         min_coverage, 
+        assembly_method,
         export_graphs,
         only_largest,
         min_length,
@@ -459,6 +488,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+    
 
     fn create_test_fasta() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
@@ -486,7 +516,7 @@ mod tests {
         let test_file = create_test_fasta();
         
         // Use k=20 for testing instead of k=47
-        let contigs = assemble_fasta(test_file.path(), 20, 1).unwrap();
+        let contigs = assemble_fasta(test_file.path(), 20, 1, AssemblyMethod::Compression, Some(false)).unwrap();
         
         assert!(!contigs.is_empty(), "Should produce at least one contig");
         
@@ -494,5 +524,113 @@ mod tests {
             println!("First contig: {}", contig);
             assert!(contig.len() > 150, "Should produce a contig longer than 150bp");
         }
+    }
+    // Helper function to create a simple test graph
+    fn create_test_sequences() -> Vec<String> {
+        vec![
+            "GAGACTGCATGGAAAA".to_string(),
+            "AAAACCCCCAAAAA".to_string(),
+            "AAAAATTTAGTGAGGGT".to_string(),
+        ]
+    }
+
+    #[test]
+    fn test_full_assembly_with_path_finding() {
+        let sequences = create_test_sequences();
+        
+        let result = assemble_sequences(
+            sequences,
+            4, // Small k-mer size for test
+            1, // Min coverage
+            AssemblyMethod::ShortestPath {
+                start_anchor: "GAGACTGCATGG".to_string(),
+                end_anchor: "TTTAGTGAGGGT".to_string(),
+            },
+            Some(false), // Don't export graphs
+            None,
+            None,
+            None,
+            Some("prefix".to_string()),
+        );
+        
+        assert!(result.is_ok(), "Assembly should succeed");
+        let contigs = result.unwrap();
+        assert!(!contigs.is_empty(), "Should produce at least one contig");
+        
+        // Check if the contig contains both anchors
+        let contig = &contigs[0];
+        assert!(contig.contains("GAGACTGCATGG"), "Contig should contain start anchor");
+        assert!(contig.contains("TTTAGTGAGGGT"), "Contig should contain end anchor");
+    }
+
+    #[test]
+    fn test_assembly_with_invalid_anchors() {
+        // Create test sequences that don't contain the anchors
+        let sequences = vec![
+            "AAAACCCCCAAAAA".to_string(),
+            "TTTTTGGGGGTTTT".to_string(),
+        ];
+        
+        let result = assemble_sequences(
+            sequences,
+            4,
+            1,
+            AssemblyMethod::ShortestPath {
+                start_anchor: "NONEXISTENT".to_string(),
+                end_anchor: "ALSONOTHERE".to_string(),
+            },
+            Some(false),
+            None,
+            None,
+            None,
+            Some("prefix".to_string()),
+        );
+        
+        assert!(result.is_ok(), "Assembly should complete");
+        let contigs = result.unwrap();
+        assert!(contigs.is_empty(), "Should produce no contigs when anchors aren't found");
+    }
+
+    #[test]
+    fn test_compare_assembly_methods() {
+        let sequences = create_test_sequences();
+        
+        // Test compression method
+        let compression_result = assemble_sequences(
+            sequences.clone(),
+            4,
+            1,
+            AssemblyMethod::Compression,
+            Some(false),
+            None,
+            None,
+            None,
+            Some("prefix".to_string()),
+        );
+        
+        // Test path finding method
+        let path_finding_result = assemble_sequences(
+            sequences,
+            4,
+            1,
+            AssemblyMethod::ShortestPath {
+                start_anchor: "GAGACTGCATGG".to_string(),
+                end_anchor: "TTTAGTGAGGGT".to_string(),
+            },
+            Some(false),
+            None,
+            None,
+            None,
+            Some("prefix".to_string()),
+        );
+        
+        assert!(compression_result.is_ok(), "Compression assembly should succeed");
+        assert!(path_finding_result.is_ok(), "Path finding assembly should succeed");
+        
+        let compression_contigs = compression_result.unwrap();
+        let path_finding_contigs = path_finding_result.unwrap();
+        
+        assert!(!compression_contigs.is_empty(), "Compression should produce contigs");
+        assert!(!path_finding_contigs.is_empty(), "Path finding should produce contigs");
     }
 }
