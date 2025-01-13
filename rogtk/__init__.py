@@ -49,7 +49,7 @@ def assemble_sequences(
     export_graphs: bool = False,
     only_largest: bool = False,
     min_length: int | None = None,
-    auto_k: bool = True,
+    auto_k: bool = False,
     prefix: str | None = None
 ) -> pl.Expr:
     """
