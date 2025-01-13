@@ -7,6 +7,7 @@ use log::*;
 use std::fmt::Debug;
 use serde::Deserialize;
 
+#[allow(dead_code)]
 pub struct PathFindingResult {
     pub path: Vec<String>,
     pub total_weight: f64,
