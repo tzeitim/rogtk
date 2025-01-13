@@ -143,11 +143,19 @@ pub fn find_shortest_path(
         
         // Run Dijkstra's algorithm from this start node
         let distances = dijkstra(graph, start, None, |e| *e.weight());
+
+
         debug!("Completed Dijkstra's algorithm from start node {}, found {} reachable nodes", 
                i + 1, distances.len());
         
         // Check all possible end nodes
         for (j, &end) in end_nodes.iter().enumerate() {
+
+            debug!("Distances computed for start node {} -> end node {}:", i + 1, j + 1);
+            for (node, dist) in &distances {
+                debug!("  Node {:?} -> Distance: {}", graph[*node], dist);
+            }
+
             if let Some(weight) = distances.get(&end) {
                 debug!("Found path to end node {}/{} with weight {}", 
                        j + 1, end_nodes.len(), weight);
