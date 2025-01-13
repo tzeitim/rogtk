@@ -4,7 +4,7 @@ use pyo3_polars::derive::polars_expr;
 use crate::fracture::assemble_sequences;
 use crate::djfind::AssemblyMethod;
 
-//use crate::fracture_opt::optimize_assembly;
+use log::debug;
 
 fn parse_cigar_str(cigar: &str, output: &mut String, block_dels: bool) {
     let mut num_buf = String::new();
@@ -225,13 +225,16 @@ fn split_string(phred_str: &str, output: &mut String, base: u8) {
 
 
 // fracture
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
+
 struct AssemblyKwargs {
     k: usize,
     min_coverage: usize,
+    method: String,
+    start_anchor: Option<String>,
+    end_anchor: Option<String>,
     export_graphs: Option<bool>,
     min_length: Option<usize>,
-    method: AssemblyMethod,
     auto_k: Option<bool>,
     prefix: Option<String>,
 }
@@ -244,6 +247,19 @@ fn output_string_type(input_fields: &[Field]) -> PolarsResult<Field> {
 
 #[polars_expr(output_type_func=output_string_type)]
 fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsResult<Series> {
+    debug!("Received kwargs: {:?}", kwargs);
+
+    let method = AssemblyMethod::from_str(
+        &kwargs.method,
+        kwargs.start_anchor,
+        kwargs.end_anchor,
+    ).map_err(|e| PolarsError::ComputeError(
+        format!("Invalid assembly method: {}", e).into()
+    ))?;
+
+    debug!("Parsed method: {:?}", method);
+
+
     // Extract sequences from input series
     let ca = inputs[0].str()?;
     
@@ -258,7 +274,7 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
         sequences,
         kwargs.k,
         kwargs.min_coverage,
-        kwargs.method,
+        method,
         kwargs.export_graphs,
         Some(true), // Hardcoded to true
         kwargs.min_length,
@@ -295,7 +311,9 @@ struct SweepParams {
     cov_start: usize,
     cov_end: usize, 
     cov_step: usize,
-    method: AssemblyMethod,
+    method: String,
+    start_anchor: Option<String>,
+    end_anchor: Option<String>,
     export_graphs: Option<bool>,
     prefix: Option<String>
 }
@@ -313,16 +331,21 @@ fn struct_output_type(input_fields: &[Field]) -> PolarsResult<Field> {
 
 #[polars_expr(output_type_func=struct_output_type)]
 fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsResult<Series> {
-    // Extract sequences from input series
     let ca = inputs[0].str()?;
     
-    // Convert string chunk to Vec<String>
     let sequences: Vec<String> = ca.into_iter()
         .flatten()
         .map(|s| s.to_string())
         .collect();
+    
+    let method = AssemblyMethod::from_str(
+        &kwargs.method,
+        kwargs.start_anchor.clone(),
+        kwargs.end_anchor.clone(),
+    ).map_err(|e| PolarsError::ComputeError(
+        format!("Invalid assembly method: {}", e).into()
+    ))?;
 
-    // Create vectors to store our field values
     let mut k_values = Vec::new();
     let mut cov_values = Vec::new();
     let mut len_values = Vec::new();
@@ -330,16 +353,16 @@ fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsR
     for k in (kwargs.k_start..=kwargs.k_end).step_by(kwargs.k_step) {
         for min_cov in (kwargs.cov_start..=kwargs.cov_end).step_by(kwargs.cov_step) {
             // Run assembly with current parameters
-//pub fn assemble_sequences(
-//    sequences: Vec<String>, 
-//    k: usize, 
-//    min_coverage: usize, 
-//    method: AssemblyMethod, 
-//    export_graphs: Option<bool>,
-//    only_largest: Option<bool>,
-//    min_length: Option<usize>,
-//    auto_k: Option<bool>,
-//    prefix: Option<String>,
+            //pub fn assemble_sequences(
+            //    sequences: Vec<String>, 
+            //    k: usize, 
+            //    min_coverage: usize, 
+            //    method: AssemblyMethod, 
+            //    export_graphs: Option<bool>,
+            //    only_largest: Option<bool>,
+            //    min_length: Option<usize>,
+            //    auto_k: Option<bool>,
+            //    prefix: Option<String>,
             //
             match assemble_sequences(
                 sequences.clone(),
@@ -348,7 +371,7 @@ fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsR
                 // TODO: Optimize by using references to AssemblyMethod instead of cloning.
                 // This would require updating function signatures across the codebase 
                 // to accept &AssemblyMethod instead of AssemblyMethod.
-                kwargs.method.clone(),
+                method.clone(),
                 kwargs.export_graphs,
                 Some(true),
                 None,

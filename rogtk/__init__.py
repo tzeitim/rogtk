@@ -43,7 +43,9 @@ def assemble_sequences(
     expr: IntoExpr,
     k: int = 31,
     min_coverage: int = 1,
-    method: 'compression',
+    method: str = 'compression',  # Changed from enum to str
+    start_anchor: str | None = None,  # New parameter
+    end_anchor: str | None = None,    # New parameter 
     export_graphs: bool = False,
     only_largest: bool = False,
     min_length: int | None = None,
@@ -61,21 +63,15 @@ def assemble_sequences(
         K-mer size for graph construction (used if auto_k=False)
     min_coverage : int
         Minimum k-mer coverage threshold
+    method : str
+        Assembly method ('compression' or 'shortest_path')
+    start_anchor : str, optional
+        Start sequence anchor for shortest_path method
+    end_anchor : str, optional 
+        End sequence anchor for shortest_path method
     export_graphs : bool, optional
         Whether to export graph visualization files
-    only_largest : bool, optional
-        Return only the largest contig
-    min_length : int, optional
-        Minimum contig length to return
-    auto_k : bool, optional
-        Automatically estimate optimal k-mer size
-    prefix : str, optional
-        Prefix for output files
-        
-    Returns
-    -------
-    pl.Expr
-        Expression containing assembled contigs
+    ...
     """
     return register_plugin_function(
         plugin_path=Path(__file__).parent,
@@ -84,6 +80,9 @@ def assemble_sequences(
         kwargs={
             "k": k,
             "min_coverage": min_coverage,
+            "method": method,
+            "start_anchor": start_anchor,
+            "end_anchor": end_anchor,
             "export_graphs": export_graphs,
             "only_largest": only_largest,
             "min_length": min_length,
@@ -94,7 +93,6 @@ def assemble_sequences(
         is_elementwise=False,
     )
 
-
 def sweep_assembly_params(
     expr: IntoExpr,
     k_start: int = 5,
@@ -103,6 +101,9 @@ def sweep_assembly_params(
     cov_start: int = 1,
     cov_end: int = 150,
     cov_step: int = 1,
+    method: str = 'compression',  # Changed from enum to str
+    start_anchor: str | None = None,  # New parameter
+    end_anchor: str | None = None,    # New parameter
     export_graphs: bool = False,
     prefix: str | None = None
 ) -> pl.Expr:
@@ -111,29 +112,14 @@ def sweep_assembly_params(
     
     Parameters
     ----------
-    expr : IntoExpr
-        Input expression containing DNA sequences
-    k_start : int
-        Starting k-mer size
-    k_end : int
-        Ending k-mer size (inclusive)
-    k_step : int 
-        Step size for k-mer parameter
-    cov_start : int
-        Starting minimum coverage
-    cov_end : int
-        Ending minimum coverage (inclusive)
-    cov_step : int
-        Step size for coverage parameter
-    export_graphs : bool
-        Whether to export assembly graphs
-    prefix : str, optional
-        Prefix for output files
-        
-    Returns
-    -------
-    pl.Expr
-        Expression containing list of [k, min_coverage, max_contig_length] for each parameter combination
+    ...
+    method : str
+        Assembly method ('compression' or 'shortest_path')
+    start_anchor : str, optional
+        Start sequence anchor for shortest_path method
+    end_anchor : str, optional
+        End sequence anchor for shortest_path method
+    ...
     """
     return register_plugin_function(
         plugin_path=Path(__file__).parent,
@@ -146,6 +132,9 @@ def sweep_assembly_params(
             "cov_start": cov_start,
             "cov_end": cov_end,
             "cov_step": cov_step,
+            "method": method,
+            "start_anchor": start_anchor,
+            "end_anchor": end_anchor,
             "export_graphs": export_graphs,
             "prefix": prefix
         },
