@@ -400,8 +400,8 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
                 Ok(vec![result.assembled_sequence])
             },
             Err(e) => {
-                error!("Path finding failed: {}", e);
-                Err(anyhow::anyhow!("Path finding assembly failed: {}", e))
+                debug!("Path finding failed: {}", e);
+                Ok(Vec::new())
             }
         }
     }

@@ -249,17 +249,20 @@ fn output_string_type(input_fields: &[Field]) -> PolarsResult<Field> {
 fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsResult<Series> {
     debug!("Received kwargs: {:?}", kwargs);
 
-    let method = AssemblyMethod::from_str(
+    let method = match AssemblyMethod::from_str(
         &kwargs.method,
-        kwargs.start_anchor,
-        kwargs.end_anchor,
-    ).map_err(|e| PolarsError::ComputeError(
-        format!("Invalid assembly method: {}", e).into()
-    ))?;
-
-    debug!("Parsed method: {:?}", method);
-
-
+        kwargs.start_anchor.clone(),
+        kwargs.end_anchor.clone(),
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            debug!("Method parsing error: {}", e);
+            return Ok(StringChunked::from_slice(
+                PlSmallStr::from_str("assembled_sequences"),
+                &[""]
+            ).into_series());
+        }
+    };
     // Extract sequences from input series
     let ca = inputs[0].str()?;
     
@@ -282,22 +285,18 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
         kwargs.prefix,
     ) {
         Ok(contigs) => {
-            // Since only_largest is true, contigs will contain at most one item
             let result = contigs.join("\n");
-            
-            // Create a new string chunked array
-            let ca = StringChunked::from_slice(
-                "assembled_sequences".into(),
-                &[result.as_str()]
-            );
-            
-            // Return as series
-            Ok(ca.into_series())
+            Ok(StringChunked::from_slice(
+                    PlSmallStr::from_str("assembled_sequences"),
+                    &[result.as_str()]
+            ).into_series())
         },
         Err(e) => {
-            Err(PolarsError::ComputeError(
-                format!("Assembly failed: {}", e).into()
-            ))
+            debug!("Assembly failed: {}", e);
+            Ok(StringChunked::from_slice(
+                    PlSmallStr::from_str("assembled_sequences"),
+                    &[""]
+            ).into_series())
         }
     }
 }
