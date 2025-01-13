@@ -536,7 +536,7 @@ mod tests {
         let test_file = create_test_fasta();
         
         // Use k=20 for testing instead of k=47
-        let contigs = assemble_fasta(test_file.path(), 20, 1, AssemblyMethod::Compression, Some(false)).unwrap();
+        let contigs = assemble_fasta(test_file.path(), 20, 1, AssemblyMethod::Compression, Some(true)).unwrap();
         
         assert!(!contigs.is_empty(), "Should produce at least one contig");
         
@@ -559,35 +559,62 @@ mod tests {
         ]
     }
 
-
-    #[test]
-    fn test_full_assembly_with_path_finding() {
-        let sequences = create_test_sequences();
-        
-        let result= assemble_sequences(
-            sequences,
-            13, //kmersize
-            1, // min_cov
-            AssemblyMethod::ShortestPath {
-                start_anchor: "GAGACTGCATGG".to_string(),
-                end_anchor: "TTTAGTGAGGGT".to_string(),
-            },
-            Some(true), // export graphs
-            None,// only largest
-            None, // min_len
-            Some(false),//auto_k
-            Some("test_prefix".to_string()),
-        );
-        
-        assert!(result.is_ok(), "Assembly should succeed");
-        let contigs = result.unwrap();
+#[test]
+fn test_full_assembly_with_path_finding() {
+    // Force initialize logger for test
+    let _ = env_logger::try_init();
+    info!("Starting path finding assembly test");
+    
+    let sequences = create_test_sequences();
+    info!("Created {} test sequences", sequences.len());
+    
+    // Log the actual sequences for debugging
+    for (i, seq) in sequences.iter().enumerate() {
+        debug!("Sequence {}: length={}, content={}", i, seq.len(), seq);
+    }
+    
+    let result = assemble_sequences(
+        sequences,
+        13, //kmersize
+        1,  // min_cov
+        AssemblyMethod::ShortestPath {
+            start_anchor: "GAGACTGCATGG".to_string(),
+            end_anchor: "TTTAGTGAGGGT".to_string(),
+        },
+        Some(true), // export graphs
+        None,       // only largest
+        None,       // min_len
+        Some(false),// auto_k
+        Some("test_prefix".to_string()),
+    );
+    
+    // More detailed error handling
+    match &result {
+        Ok(contigs) => {
+            info!("Assembly succeeded with {} contigs", contigs.len());
+            for (i, contig) in contigs.iter().enumerate() {
+                info!("Contig {}: length={}", i, contig.len());
+                debug!("Contig {}: content={}", i, contig);
+            }
+        }
+        Err(e) => {
+            error!("Assembly failed with error: {}", e);
+        }
+    }
+    
+    assert!(result.is_ok(), "Assembly should succeed");
+    
+    if let Ok(contigs) = result {
         assert!(!contigs.is_empty(), "Should produce at least one contig");
         
         // Check if the contig contains both anchors
         let contig = &contigs[0];
-        assert!(contig.contains("GAGACTGCATGG"), "Contig should contain start anchor");
-        assert!(contig.contains("TTTAGTGAGGGT"), "Contig should contain end anchor");
+        assert!(contig.contains("GAGACTGCATGG"), 
+                "Contig should contain start anchor");
+        assert!(contig.contains("TTTAGTGAGGGT"), 
+                "Contig should contain end anchor");
     }
+}
 
     #[test]
     fn test_assembly_with_invalid_anchors() {

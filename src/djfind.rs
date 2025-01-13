@@ -131,17 +131,31 @@ pub fn find_shortest_path(
     start_nodes: &[NodeIndex],
     end_nodes: &[NodeIndex],
 ) -> Option<(Vec<NodeIndex>, f64)> {
+    let _ = env_logger::try_init();
+    info!("Starting shortest path search with {} start nodes and {} end nodes", 
+          start_nodes.len(), end_nodes.len());
+    
     let mut best_path = None;
     let mut min_total_weight = f64::INFINITY;
     
-    for &start in start_nodes {
+    for (i, &start) in start_nodes.iter().enumerate() {
+        debug!("Analyzing start node {}/{}: {:?}", i + 1, start_nodes.len(), graph[start]);
+        
         // Run Dijkstra's algorithm from this start node
         let distances = dijkstra(graph, start, None, |e| *e.weight());
+        debug!("Completed Dijkstra's algorithm from start node {}, found {} reachable nodes", 
+               i + 1, distances.len());
         
         // Check all possible end nodes
-        for &end in end_nodes {
+        for (j, &end) in end_nodes.iter().enumerate() {
             if let Some(weight) = distances.get(&end) {
+                debug!("Found path to end node {}/{} with weight {}", 
+                       j + 1, end_nodes.len(), weight);
+                
                 if *weight < min_total_weight {
+                    debug!("New best path found with weight {} (previous best: {})", 
+                           weight, min_total_weight);
+                    
                     // Reconstruct path
                     let mut path = Vec::new();
                     let mut current = end;
@@ -158,23 +172,39 @@ pub fn find_shortest_path(
                                     min_weight = dist + edge_weight;
                                     min_prev = Some(neighbor);
                                 }
-
                             }
                         }
                         
                         if let Some(prev) = min_prev {
                             current = prev;
                             path.push(current);
+                            trace!("Added node to path: {:?}", graph[current]);
                         } else {
+                            warn!("Path reconstruction failed: couldn't find previous node");
                             break;
                         }
                     }
                     
                     path.reverse();
                     min_total_weight = *weight;
-                    best_path = Some((path, *weight));
+                    best_path = Some((path.clone(), *weight));
+                    
+                    info!("Updated best path: length={}, total_weight={}", 
+                          path.len(), weight);
                 }
+            } else {
+                debug!("No path found to end node {}/{}", j + 1, end_nodes.len());
             }
+        }
+    }
+    
+    match &best_path {
+        Some((path, weight)) => {
+            info!("Found optimal path: length={}, total_weight={}", 
+                  path.len(), weight);
+        }
+        None => {
+            warn!("No valid path found between any start and end nodes");
         }
     }
     
@@ -195,6 +225,7 @@ pub fn assemble_with_path_finding<K: Kmer + Send + Sync + Debug + 'static>(
     start_anchor: &str,
     end_anchor: &str,
 ) -> Result<PathFindingResult, String> {
+    let _ = env_logger::try_init();
     info!("Converting de Bruijn graph to weighted digraph for path finding");
     
     // Convert to petgraph
