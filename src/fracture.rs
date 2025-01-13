@@ -111,7 +111,8 @@ fn analyze_dbg<K: Kmer + Send + Sync + Debug + 'static>(
         true,
         4
     );
-
+    
+    let _ = env_logger::try_init();
     // Count important graph features
     let mut terminal_count = 0;
     let mut isolated_count = 0;
@@ -192,6 +193,8 @@ pub fn assemble_sequences(
     auto_k: Option<bool>,
     prefix: Option<String>,
 ) -> Result<Vec<String>> {
+    let _ = env_logger::try_init();
+
     info!("Starting assembly of {} sequences with k={}, min_coverage={}", sequences.len(), k, min_coverage);
     
     let k = if auto_k.unwrap_or(false) {
@@ -321,6 +324,7 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
     method: AssemblyMethod,
     export_graphs: Option<bool>,
 ) -> Result<Vec<String>> {
+    let _ = env_logger::try_init();
     let should_export = export_graphs.unwrap_or(true);
     
     // Get initial kmers and stats
@@ -374,7 +378,7 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
             Ok(contigs)
         },
         AssemblyMethod::ShortestPath { start_anchor, end_anchor } => {
-        // Export preliminary graph if enabled
+
         if should_export {
             let prelim_path = format!("{}_preliminary.dot", prefix);
             export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
@@ -387,14 +391,13 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
             Ok(result) => {
                 info!("Path finding succeeded - found path of {} nodes", result.path.len());
                 
-                // Export result graph if enabled
                 if should_export {
                     let path_path = format!("{}_path.dot", prefix);
-                    export_graph(&preliminary_graph, &path_path, "Path Finding ")?;
+                    export_graph(&preliminary_graph, &path_path, "Path_Finding ")?;
                     info!("Exported path-finding graph to {}", path_path);
                 }
                 
-                Ok(result.path)
+                Ok(vec![result.assembled_sequence])
             },
             Err(e) => {
                 error!("Path finding failed: {}", e);
@@ -548,14 +551,13 @@ mod tests {
     // Helper function to create a simple test graph
         fn create_test_sequences() -> Vec<String> {
         vec![
+            // GAGACTGCATGGGCTGGTGGGCGTCCGTCTGCTTTAGTGAGGGT
+            // GAGACTGCATGGGCTGGTGGGCGTCCGTCTGC
+                    //   GGGCTGGTGGGCGTCCGTCTGCTTTAGTGAGGGT
             // Start sequence containing the start anchor
-            "GAGACTGCATGGGCTGGTGGGCGTCCGTCTGCATTCTGCTCGCACTGCACGACAGTCGATGGAGTCGCGAGCGCTTTGAGCGACTAAGGAGTCGATACGATACGGGCACGCTATGGAGTCGAGAGCGCGCTCCTCC".to_string(),
-            // Middle sequences to bridge the gap
-            "GCATGGTTCGAAAACC".to_string(),
-            "AAAAACCCCCAAAAA".to_string(),
-            "CCCCCAAAAATTTAGTG".to_string(),
+            "GAGACTGCATGGGCTGGTGGGCGTCCGTCTGC".to_string(),
             // End sequence containing the end anchor
-            "GGAGACGCGACTGTACGCAGACGCGACGGAGTCGATAGTATGCGTACTCGCGATGGTGTCGAGTCGAGACGCTGAGGATAGGGAGTCGATACGTAGCATGCGATGGACGCGCATCCAAATCGAGCACTTTAGTGAGGGT".to_string(),
+            "GGGCTGGTGGGCGTCCGTCTGCTTTAGTGAGGGT".to_string(),
         ]
     }
 
@@ -594,7 +596,7 @@ fn test_full_assembly_with_path_finding() {
             info!("Assembly succeeded with {} contigs", contigs.len());
             for (i, contig) in contigs.iter().enumerate() {
                 info!("Contig {}: length={}", i, contig.len());
-                debug!("Contig {}: content={}", i, contig);
+                info!("Contig {}: content={}", i, contig);
             }
         }
         Err(e) => {
@@ -613,6 +615,9 @@ fn test_full_assembly_with_path_finding() {
                 "Contig should contain start anchor");
         assert!(contig.contains("TTTAGTGAGGGT"), 
                 "Contig should contain end anchor");
+
+        println!("\nSuccessfully assembled sequence (length={}):\n{}", contig.len(), contig);
+
     }
 }
 

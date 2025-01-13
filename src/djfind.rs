@@ -7,13 +7,13 @@ use log::*;
 use std::fmt::Debug;
 use serde::Deserialize;
 
-
-// New struct to hold path finding results
 pub struct PathFindingResult {
     pub path: Vec<String>,
     pub total_weight: f64,
     pub mean_coverage: f64,
+    pub assembled_sequence: String,
 }
+
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +59,23 @@ impl AssemblyMethod {
         }
     }
 }
+
+fn concatenate_path_sequences(sequences: &[String], k: usize) -> String {
+    if sequences.is_empty() {
+        return String::new();
+    }
+    
+    let mut final_sequence = sequences[0].clone();
+    
+    // For each subsequent sequence
+    for next_seq in sequences.iter().skip(1) {
+        // Add only the non-overlapping part of the next sequence
+        final_sequence.push_str(&next_seq[k - 1..]);
+    }
+    
+    final_sequence
+}
+
 
 // Convert DebruijnGraph to petgraph::Graph for path finding
 fn convert_to_petgraph<K: Kmer, D: std::fmt::Debug + Copy>(
@@ -255,14 +272,21 @@ pub fn assemble_with_path_finding<K: Kmer + Send + Sync + Debug + 'static>(
     if let Some((path, total_weight)) = find_shortest_path(&pg, &start_nodes, &end_nodes) {
         let sequences = extract_path_sequences(&pg, &path);
         let mean_coverage = 1.0 / (total_weight / path.len() as f64);
+
+        let assembled_sequence = concatenate_path_sequences(&sequences, K::k());
+
         
         info!("Found path with total weight {} and mean coverage {}", 
               total_weight, mean_coverage);
+
+        info!("Assembled sequence length: {}", assembled_sequence.len());
+
         
         Ok(PathFindingResult {
             path: sequences,
             total_weight,
             mean_coverage,
+            assembled_sequence,
         })
 
     } else {
