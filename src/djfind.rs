@@ -112,7 +112,10 @@ fn convert_to_petgraph<K: Kmer, D: std::fmt::Debug + Copy>(
             // Find corresponding petgraph NodeIndex for to_id
             if let Some(to_idx) = node_indices.iter().find(|&&idx| node_map[&idx] == to_id) {
                 // Weight is inverse of mean coverage between nodes
-                let weight = 2.0 / (from_coverage + to_coverage);
+                //let weight = 2.0 / (from_coverage + to_coverage);
+                // negative log
+                let mean_coverage = (from_coverage + to_coverage) / 2.0;
+                let weight = -mean_coverage.ln();
                 pg.add_edge(*from_idx, *to_idx, weight);
             }
         }
