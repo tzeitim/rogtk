@@ -6,6 +6,7 @@ use debruijn::*;
 use debruijn::graph::DebruijnGraph;
 use anyhow::Result;
 use polars::prelude::*;
+use log::info;
 
 /// Convert graph into a single DataFrame where each row represents a node
 /// and its associated edges
@@ -25,6 +26,7 @@ fn graph_to_dataframe<K: Kmer, D: std::fmt::Debug>(
         let left_edges = node.l_edges();
         let right_edges = node.r_edges();
         
+        info!(" in df {}", node.sequence().to_string());
         // Basic node information
         node_ids.push(node_id as i64);
         sequences.push(node.sequence().to_string());

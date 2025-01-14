@@ -17,6 +17,9 @@ use std::fmt::Debug;
 use crate::graph_viz::export_graph;
 use crate::djfind::*;
 
+use std::fs::File;
+use polars::prelude::*;
+
 
 fn estimate_k(sequences: &[String]) -> usize {
     // Safety checks
@@ -390,11 +393,17 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
         match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor) {
             Ok(result) => {
                 info!("Path finding succeeded - found path of {} nodes", result.path.len());
-                
+
                 if should_export {
-                    let path_path = format!("{}_path.dot", prefix);
-                    export_graph(&preliminary_graph, &path_path, "Path_Finding ")?;
-                    info!("Exported path-finding graph to {}", path_path);
+                    // Export path sequences to CSV
+                    let path_path = format!("{}_path.csv", prefix);
+                    let mut path_df = DataFrame::new(vec![
+                        Series::new("sequence".into(), &result.path),
+                        Series::new("coverage".into(), vec![1; result.path.len()]),
+                    ])?;
+                    CsvWriter::new(File::create(path_path)?)
+                        .finish(&mut path_df)?;
+
                 }
                 
                 Ok(vec![result.assembled_sequence])

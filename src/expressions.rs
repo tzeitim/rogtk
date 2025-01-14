@@ -249,11 +249,19 @@ fn output_string_type(input_fields: &[Field]) -> PolarsResult<Field> {
 fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsResult<Series> {
     debug!("Received kwargs: {:?}", kwargs);
 
-    let method = match AssemblyMethod::from_str(
-        &kwargs.method,
-        kwargs.start_anchor.clone(),
-        kwargs.end_anchor.clone(),
-    ) {
+    // Create AssemblyMethod based on method string
+    let method = match kwargs.method.as_str() {
+        "compression" => Ok(AssemblyMethod::Compression),
+        "shortest_path" => AssemblyMethod::from_str(
+            &kwargs.method,
+            kwargs.start_anchor,
+            kwargs.end_anchor,
+        ),
+        _ => Err("Invalid assembly method. Must be 'compression' or 'shortest_path'".to_string())
+    };
+
+    // Handle any errors from method parsing
+    let method = match method {
         Ok(m) => m,
         Err(e) => {
             debug!("Method parsing error: {}", e);
@@ -263,6 +271,7 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
             ).into_series());
         }
     };
+
     // Extract sequences from input series
     let ca = inputs[0].str()?;
     
@@ -300,7 +309,6 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
         }
     }
 }
-
 
 #[derive(Deserialize)]
 struct SweepParams {

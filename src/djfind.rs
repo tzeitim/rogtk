@@ -276,7 +276,6 @@ pub fn assemble_with_path_finding<K: Kmer + Send + Sync + Debug + 'static>(
 
         let assembled_sequence = concatenate_path_sequences(&sequences, K::k());
 
-        
         info!("Found path with total weight {} and mean coverage {}", 
               total_weight, mean_coverage);
 
