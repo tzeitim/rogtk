@@ -41,14 +41,14 @@ def nn(expr: IntoExpr, base: int=33) -> pl.Expr:
 #@pl.api.register_expr_namespace("fracture")
 def assemble_sequences(
     expr: IntoExpr,
-    k: int = 31,
-    min_coverage: int = 1,
-    method: str = 'compression',  # Changed from enum to str
-    start_anchor: str | None = None,  # New parameter
-    end_anchor: str | None = None,    # New parameter 
+    k: int = 10,
+    min_coverage: int = 5,
+    method: str = 'shortest_path',  
+    start_anchor: str | None = None,
+    end_anchor: str | None = None, 
+    min_length: int | None = None,
     export_graphs: bool = False,
     only_largest: bool = False,
-    min_length: int | None = None,
     auto_k: bool = False,
     prefix: str | None = None
 ) -> pl.Expr:
@@ -83,9 +83,9 @@ def assemble_sequences(
             "method": method,
             "start_anchor": start_anchor,
             "end_anchor": end_anchor,
+            "min_length": min_length,
             "export_graphs": export_graphs,
             "only_largest": only_largest,
-            "min_length": min_length,
             "auto_k": auto_k,
             "prefix": prefix
         },
@@ -101,11 +101,13 @@ def sweep_assembly_params(
     cov_start: int = 1,
     cov_end: int = 150,
     cov_step: int = 1,
-    method: str = 'compression',  # Changed from enum to str
-    start_anchor: str | None = None,  # New parameter
-    end_anchor: str | None = None,    # New parameter
+    method: str = 'shortest_path',
+    start_anchor: str | None = None,
+    end_anchor: str | None = None,
+    min_length: int | None = None,
     export_graphs: bool = False,
-    prefix: str | None = None
+    prefix: str | None = None,
+    auto_k: bool = False,
 ) -> pl.Expr:
     """
     Run sequence assembly across ranges of k-mer size and minimum coverage parameters.
@@ -135,8 +137,10 @@ def sweep_assembly_params(
             "method": method,
             "start_anchor": start_anchor,
             "end_anchor": end_anchor,
+            "min_length": min_length,
             "export_graphs": export_graphs,
-            "prefix": prefix
+            "prefix": prefix,
+            "auto_k": auto_k
         },
         returns_scalar=True,
         is_elementwise=False,
@@ -144,23 +148,33 @@ def sweep_assembly_params(
 
 def optimize_assembly(
     expr: IntoExpr,
-    start_k: int,
-    start_min_coverage: int,
-    start_anchor: str,
-    end_anchor: str,
+    method: str = 'shortest_path',
+    start_anchor: str | None = None,
+    end_anchor: str | None = None,
+    start_k: int = 31,
+    start_min_coverage: int = 1,
+    min_length: int | None = None,
+    export_graphs: bool = False,
+    prefix: str | None = None,
     max_iterations: int | None = None,
     explore_k: bool | None = None,
     prioritize_length: bool | None = None,
 ) -> pl.Expr:
+    if start_anchor is None or end_anchor is None:
+        raise ValueError("Both start_anchor and e®d_anchor are required")
     return register_plugin_function(
         plugin_path=Path(__file__).parent,
         function_name="optimize_assembly_expr",
         args=expr,
         kwargs={
-            "start_k": start_k,
-            "start_min_coverage": start_min_coverage,
+            "method": method,
             "start_anchor": start_anchor,
             "end_anchor": end_anchor,
+            "start_k": start_k,
+            "start_min_coverage": start_min_coverage,
+            "min_length": min_length,
+            "export_graphs": export_graphs,
+            "prefix": prefix,
             "max_iterations": max_iterations,
             "explore_k": explore_k,
             "prioritize_length": prioritize_length

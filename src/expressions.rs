@@ -231,12 +231,18 @@ struct AssemblyKwargs {
     k: usize,
     min_coverage: usize,
     method: String,
+    // optional parameters
     start_anchor: Option<String>,
     end_anchor: Option<String>,
-    export_graphs: Option<bool>,
     min_length: Option<usize>,
+    export_graphs: Option<bool>,
+    only_largest: Option<bool>,
     auto_k: Option<bool>,
     prefix: Option<String>,
+    // optimization related
+    max_iterations: Option<bool>,
+    explore_k: Option<bool>,
+    prioritize_lenth: Option<bool>,
 }
 
 // Default string output type for the expression
@@ -321,8 +327,10 @@ struct SweepParams {
     method: String,
     start_anchor: Option<String>,
     end_anchor: Option<String>,
+    min_length: Option<usize>,
     export_graphs: Option<bool>,
-    prefix: Option<String>
+    prefix: Option<String>,
+    auto_k: Option<bool>,
 }
 
 fn struct_output_type(input_fields: &[Field]) -> PolarsResult<Field> {

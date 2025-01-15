@@ -9,15 +9,19 @@ use log::*;
 
 #[derive(Deserialize)]
 pub struct OptimizeParams {
+    pub start_anchor: Option<String>,
+    pub end_anchor: Option<String>,
+
+    pub method: String,
+    pub min_length: Option<usize>,
+    pub export_graphs: Option<bool>,
+    pub prefix: Option<String>,
+
     pub start_k: usize,
     pub start_min_coverage: usize,
-    pub start_anchor: String,
-    pub end_anchor: String,
     pub max_iterations: Option<usize>,
     pub explore_k: Option<bool>,
     pub prioritize_length: Option<bool>,
-    pub method: AssemblyMethod,
-
 }
 
 mod types {
@@ -289,6 +293,18 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
     let explore_k = kwargs.explore_k.unwrap_or(false);
     let prioritize_length = kwargs.prioritize_length.unwrap_or(false);
     
+    let start_anchor = kwargs.start_anchor.ok_or_else(||
+        PolarsError::ComputeError("start_anchor is required".into()))?;
+
+    let end_anchor = kwargs.end_anchor.ok_or_else(||
+        PolarsError::ComputeError("end_anchor is required".into()))?;
+
+    let assembly_method = AssemblyMethod::from_str(
+        &kwargs.method,
+        Some(start_anchor.clone()),  
+        Some(end_anchor.clone())
+    ).map_err(|e| PolarsError::ComputeError(e.into()))?;
+
     let start_params = ParamPoint {
         k: kwargs.start_k,
         min_coverage: kwargs.start_min_coverage,
@@ -300,12 +316,12 @@ pub fn optimize_assembly_expr(inputs: &[Series], kwargs: OptimizeParams) -> Pola
     match optimize_assembly(
         &sequences,
         start_params,
-        &kwargs.start_anchor,
-        &kwargs.end_anchor,
+        &start_anchor,
+        &end_anchor,
         max_iterations,
         explore_k,
         prioritize_length,
-        kwargs.method,
+        assembly_method,
     ) {
         Ok(Some(result)) => {
             info!("Optimization successful");
