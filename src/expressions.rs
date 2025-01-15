@@ -226,7 +226,7 @@ fn split_string(phred_str: &str, output: &mut String, base: u8) {
 
 // fracture
 #[derive(Deserialize, Debug)]
-
+#[allow(dead_code)]
 struct AssemblyKwargs {
     k: usize,
     min_coverage: usize,
@@ -317,6 +317,7 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct SweepParams {
     k_start: usize,
     k_end: usize,

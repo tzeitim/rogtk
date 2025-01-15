@@ -8,6 +8,7 @@ use crate::djfind::AssemblyMethod;
 use log::*;
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct OptimizeParams {
     pub start_anchor: Option<String>,
     pub end_anchor: Option<String>,
