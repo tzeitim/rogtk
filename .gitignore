@@ -12,3 +12,7 @@ target
 .DS_Store
 rogtk/__pycache__
 Cargo.lock
+*__*.dot
+*__*.csv
+.tmp*.dot
+.tmp*.csv
