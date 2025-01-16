@@ -73,99 +73,122 @@ fn concatenate_path_sequences(sequences: &[String], k: usize) -> String {
     final_sequence
 }
 
+// Custom struct to hold node data with Drop trait
+struct NodeData {
+    sequence: String,
+    coverage: f64,
+}
 
-// Convert DebruijnGraph to petgraph::Graph for path finding
+impl Drop for NodeData {
+    fn drop(&mut self) {
+        // Custom cleanup logic if needed
+        self.sequence.clear();
+    }
+}
+
 fn convert_to_petgraph<K: Kmer, D: std::fmt::Debug + Copy>(
     graph: &DebruijnGraph<K, D>,
-) -> (DiGraph<String, f64>, HashMap<NodeIndex, usize>) {
-    let mut pg = DiGraph::new();
-    let mut node_map = HashMap::new();
+) -> (DiGraph<NodeData, f64>, HashMap<NodeIndex, usize>) {
+    // Pre-allocate collections with capacity
+    let node_count = graph.len();
+    let mut pg = DiGraph::with_capacity(node_count, node_count * 2);  // Estimate edge count
+    let mut node_map = HashMap::with_capacity(node_count);
     
     // First pass: create nodes
-    for node_id in 0..graph.len() {
+    // Store indices in a pre-allocated Vec to avoid repeated allocations
+    let mut node_indices = Vec::with_capacity(node_count);
+    
+    for node_id in 0..node_count {
         let node = graph.get_node(node_id);
-        let sequence = node.sequence().to_string();
-        let idx = pg.add_node(sequence);
+        // Create NodeData struct that owns the sequence string
+        let node_data = NodeData {
+            sequence: node.sequence().to_string(),  // One-time allocation
+            coverage: match node.data() {
+                d => format!("{:?}", d).parse::<f64>().unwrap_or(1.0)
+            },
+        };
+        
+        let idx = pg.add_node(node_data);
         node_map.insert(idx, node_id);
+        node_indices.push(idx);
     }
     
-    // Second pass: create edges with weights
-    let node_indices: Vec<NodeIndex> = pg.node_indices().collect();
-    for from_idx in &node_indices {
-        let from_id = node_map[from_idx];
+    // Second pass: create edges
+    // Use references to avoid string allocations in edge processing
+    for (idx_pos, &from_idx) in node_indices.iter().enumerate() {
+        let from_id = node_map[&from_idx];
         let from_node = graph.get_node(from_id);
         let from_coverage = match from_node.data() {
             d => format!("{:?}", d).parse::<f64>().unwrap_or(1.0)
         };
         
-        // Add edges for right connections
+        // Process right edges in a single pass
         for (to_id, _, _) in from_node.r_edges() {
             let to_node = graph.get_node(to_id);
             let to_coverage = match to_node.data() {
                 d => format!("{:?}", d).parse::<f64>().unwrap_or(1.0)
             };
             
-            // Find corresponding petgraph NodeIndex for to_id
-            if let Some(to_idx) = node_indices.iter().find(|&&idx| node_map[&idx] == to_id) {
-                // Weight is inverse of mean coverage between nodes
-                //let weight = 2.0 / (from_coverage + to_coverage);
-                // negative log
+            // Use direct index lookup instead of find
+            if let Some(&to_idx) = node_indices.get(to_id) {
                 let mean_coverage = (from_coverage + to_coverage) / 2.0;
                 let weight = -mean_coverage.ln();
-                pg.add_edge(*from_idx, *to_idx, weight);
+                pg.add_edge(from_idx, to_idx, weight);
             }
         }
     }
     
+    // Clear temporary data structure
+    node_indices.clear();
+    
     (pg, node_map)
+}
+
+// Helper trait for finding nodes with specific sequences
+trait GraphSearchExt {
+    fn find_nodes_containing(&self, sequence: &str) -> Vec<NodeIndex>;
+}
+
+impl GraphSearchExt for DiGraph<NodeData, f64> {
+    fn find_nodes_containing(&self, sequence: &str) -> Vec<NodeIndex> {
+        self.node_indices()
+            .filter(|&idx| self[idx].sequence.contains(sequence))
+            .collect()
+    }
 }
 
 // Find nodes containing specific sequences
 fn find_anchor_nodes(
-    graph: &DiGraph<String, f64>,
+    graph: &DiGraph<NodeData, f64>,
     start_seq: &str,
     end_seq: &str,
 ) -> (Vec<NodeIndex>, Vec<NodeIndex>) {
-    let mut start_nodes = Vec::new();
-    let mut end_nodes = Vec::new();
-    
-    for node_idx in graph.node_indices() {
-        let sequence = &graph[node_idx];
-        if sequence.contains(start_seq) {
-            start_nodes.push(node_idx);
-        }
-        if sequence.contains(end_seq) {
-            end_nodes.push(node_idx);
-        }
-    }
-    
+    let start_nodes = graph.find_nodes_containing(start_seq);
+    let end_nodes = graph.find_nodes_containing(end_seq);
     (start_nodes, end_nodes)
 }
 
-// Find shortest path between anchors
 pub fn find_shortest_path(
-    graph: &DiGraph<String, f64>,
+    graph: &DiGraph<NodeData, f64>,
     start_nodes: &[NodeIndex],
     end_nodes: &[NodeIndex],
 ) -> Option<(Vec<NodeIndex>, f64)> {
     let _ = env_logger::try_init();
-    info!("Starting shortest path search with {} start nodes and {} end nodes", 
+    info!("==================Starting shortest path search with {} start nodes and {} end nodes", 
           start_nodes.len(), end_nodes.len());
     
     let mut best_path = None;
     let mut min_total_weight = f64::INFINITY;
     
     for (i, &start) in start_nodes.iter().enumerate() {
-        debug!("Analyzing start node {}/{}: {:?}", i + 1, start_nodes.len(), graph[start]);
+        debug!("Analyzing start node {}/{}: {:?}", i + 1, start_nodes.len(), graph[start].sequence);
         
         {   // New block for distances scope
-            // Run Dijkstra's algorithm from this start node
             let distances = dijkstra(graph, start, None, |e| *e.weight());
             
             debug!("Completed Dijkstra's algorithm from start node {}, found {} reachable nodes", 
                    i + 1, distances.len());
             
-            // Check all possible end nodes
             for (j, &end) in end_nodes.iter().enumerate() {
                 if let Some(weight) = distances.get(&end) {
                     debug!("Found path to end node {}/{} with weight {}", 
@@ -175,7 +198,6 @@ pub fn find_shortest_path(
                         debug!("New best path found with weight {} (previous best: {})", 
                                weight, min_total_weight);
                         
-                        // Reconstruct path in its own scope
                         let path = {
                             let mut path = Vec::with_capacity(graph.node_count());
                             let mut current = end;
@@ -198,7 +220,7 @@ pub fn find_shortest_path(
                                 if let Some(prev) = min_prev {
                                     current = prev;
                                     path.push(current);
-                                    trace!("Added node to path: {:?}", graph[current]);
+                                    trace!("Added node to path: {:?}", graph[current].sequence);
                                 } else {
                                     warn!("Path reconstruction failed: couldn't find previous node");
                                     break;
@@ -207,7 +229,7 @@ pub fn find_shortest_path(
                             
                             path.reverse();
                             path
-                        }; // path reconstruction scope ends here
+                        };
                         
                         min_total_weight = *weight;
                         best_path = Some((path, *weight));
@@ -219,7 +241,7 @@ pub fn find_shortest_path(
                     debug!("No path found to end node {}/{}", j + 1, end_nodes.len());
                 }
             }
-        } // distances goes out of scope and is dropped here
+        }
     }
     
     match &best_path {
@@ -235,15 +257,15 @@ pub fn find_shortest_path(
     best_path
 }
 
-// Extract path sequences
 pub fn extract_path_sequences(
-    graph: &DiGraph<String, f64>,
+    graph: &DiGraph<NodeData, f64>,
     path: &[NodeIndex],
 ) -> Vec<String> {
-    path.iter().map(|&idx| graph[idx].clone()).collect()
+    path.iter()
+        .map(|&idx| graph[idx].sequence.clone())
+        .collect()
 }
 
-// Main function to perform path-based assembly
 pub fn assemble_with_path_finding<K: Kmer + Send + Sync + Debug + 'static>(
     preliminary_graph: &DebruijnGraph<K, u16>,
     start_anchor: &str,
@@ -278,7 +300,6 @@ pub fn assemble_with_path_finding<K: Kmer + Send + Sync + Debug + 'static>(
               total_weight, mean_coverage);
 
         info!("Assembled sequence length: {}", assembled_sequence.len());
-
         
         Ok(PathFindingResult {
             path: sequences,
@@ -286,9 +307,7 @@ pub fn assemble_with_path_finding<K: Kmer + Send + Sync + Debug + 'static>(
             mean_coverage,
             assembled_sequence,
         })
-
     } else {
         Err("No valid path found between anchors".to_string())
     }
 }
-
