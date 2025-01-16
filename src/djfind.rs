@@ -158,70 +158,68 @@ pub fn find_shortest_path(
     for (i, &start) in start_nodes.iter().enumerate() {
         debug!("Analyzing start node {}/{}: {:?}", i + 1, start_nodes.len(), graph[start]);
         
-        // Run Dijkstra's algorithm from this start node
-        let mut distances = dijkstra(graph, start, None, |e| *e.weight());
-
-        debug!("Completed Dijkstra's algorithm from start node {}, found {} reachable nodes", 
-               i + 1, distances.len());
-        
-        // Check all possible end nodes
-        for (j, &end) in end_nodes.iter().enumerate() {
-
-            //debug!("Distances computed for start node {} -> end node {}:", i + 1, j + 1);
-            for (node, dist) in &distances {
-              //   debug!("  Node {:?} -> Distance: {}", graph[*node], dist);
-            }
-
-            if let Some(weight) = distances.get(&end) {
-                debug!("Found path to end node {}/{} with weight {}", 
-                       j + 1, end_nodes.len(), weight);
-                
-                if *weight < min_total_weight {
-                    debug!("New best path found with weight {} (previous best: {})", 
-                           weight, min_total_weight);
+        {   // New block for distances scope
+            // Run Dijkstra's algorithm from this start node
+            let distances = dijkstra(graph, start, None, |e| *e.weight());
+            
+            debug!("Completed Dijkstra's algorithm from start node {}, found {} reachable nodes", 
+                   i + 1, distances.len());
+            
+            // Check all possible end nodes
+            for (j, &end) in end_nodes.iter().enumerate() {
+                if let Some(weight) = distances.get(&end) {
+                    debug!("Found path to end node {}/{} with weight {}", 
+                           j + 1, end_nodes.len(), weight);
                     
-                    // Reconstruct path
-                    let mut path = Vec::new();
-                    let mut current = end;
-                    path.push(current);
-                    
-                    while current != start {
-                        let mut min_prev = None;
-                        let mut min_weight = f64::INFINITY;
+                    if *weight < min_total_weight {
+                        debug!("New best path found with weight {} (previous best: {})", 
+                               weight, min_total_weight);
                         
-                        for neighbor in graph.neighbors_directed(current, petgraph::Direction::Incoming) {
-                            if let Some(dist) = distances.get(&neighbor) {
-                                let edge_weight = graph.edge_weight(graph.find_edge(neighbor, current).unwrap()).unwrap();
-                                if dist + edge_weight < min_weight {
-                                    min_weight = dist + edge_weight;
-                                    min_prev = Some(neighbor);
+                        // Reconstruct path in its own scope
+                        let path = {
+                            let mut path = Vec::with_capacity(graph.node_count());
+                            let mut current = end;
+                            path.push(current);
+                            
+                            while current != start {
+                                let mut min_prev = None;
+                                let mut min_weight = f64::INFINITY;
+                                
+                                for neighbor in graph.neighbors_directed(current, petgraph::Direction::Incoming) {
+                                    if let Some(dist) = distances.get(&neighbor) {
+                                        let edge_weight = graph.edge_weight(graph.find_edge(neighbor, current).unwrap()).unwrap();
+                                        if dist + edge_weight < min_weight {
+                                            min_weight = dist + edge_weight;
+                                            min_prev = Some(neighbor);
+                                        }
+                                    }
+                                }
+                                
+                                if let Some(prev) = min_prev {
+                                    current = prev;
+                                    path.push(current);
+                                    trace!("Added node to path: {:?}", graph[current]);
+                                } else {
+                                    warn!("Path reconstruction failed: couldn't find previous node");
+                                    break;
                                 }
                             }
-                        }
+                            
+                            path.reverse();
+                            path
+                        }; // path reconstruction scope ends here
                         
-                        if let Some(prev) = min_prev {
-                            current = prev;
-                            path.push(current);
-                            trace!("Added node to path: {:?}", graph[current]);
-                        } else {
-                            warn!("Path reconstruction failed: couldn't find previous node");
-                            break;
-                        }
+                        min_total_weight = *weight;
+                        best_path = Some((path, *weight));
+                        
+                        info!("Updated best path: length={}, total_weight={}", 
+                              best_path.as_ref().unwrap().0.len(), weight);
                     }
-                    
-                    path.reverse();
-                    min_total_weight = *weight;
-                    best_path = Some((path.clone(), *weight));
-                    
-                    info!("Updated best path: length={}, total_weight={}", 
-                          path.len(), weight);
-                    path.clear()
+                } else {
+                    debug!("No path found to end node {}/{}", j + 1, end_nodes.len());
                 }
-            } else {
-                debug!("No path found to end node {}/{}", j + 1, end_nodes.len());
             }
-        }
-    distances.clear();
+        } // distances goes out of scope and is dropped here
     }
     
     match &best_path {
