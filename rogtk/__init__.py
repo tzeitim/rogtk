@@ -52,27 +52,6 @@ def assemble_sequences(
     auto_k: bool = False,
     prefix: str | None = None
 ) -> pl.Expr:
-    """
-    Assemble DNA sequences using a de Bruijn graph approach.
-    
-    Parameters
-    ----------
-    expr : IntoExpr
-        Input expression containing DNA sequences
-    k : int
-        K-mer size for graph construction (used if auto_k=False)
-    min_coverage : int
-        Minimum k-mer coverage threshold
-    method : str
-        Assembly method ('compression' or 'shortest_path')
-    start_anchor : str, optional
-        Start sequence anchor for shortest_path method
-    end_anchor : str, optional 
-        End sequence anchor for shortest_path method
-    export_graphs : bool, optional
-        Whether to export graph visualization files
-    ...
-    """
     return register_plugin_function(
         plugin_path=Path(__file__).parent,
         function_name="assemble_sequences_expr",
@@ -109,20 +88,6 @@ def sweep_assembly_params(
     prefix: str | None = None,
     auto_k: bool = False,
 ) -> pl.Expr:
-    """
-    Run sequence assembly across ranges of k-mer size and minimum coverage parameters.
-    
-    Parameters
-    ----------
-    ...
-    method : str
-        Assembly method ('compression' or 'shortest_path')
-    start_anchor : str, optional
-        Start sequence anchor for shortest_path method
-    end_anchor : str, optional
-        End sequence anchor for shortest_path method
-    ...
-    """
     return register_plugin_function(
         plugin_path=Path(__file__).parent,
         function_name="sweep_assembly_params_expr",
@@ -160,8 +125,13 @@ def optimize_assembly(
     explore_k: bool | None = None,
     prioritize_length: bool | None = None,
 ) -> pl.Expr:
-    if start_anchor is None or end_anchor is None:
-        raise ValueError("Both start_anchor and e®d_anchor are required")
+    if (start_anchor is None or end_anchor is None) and method == "shortest_path":
+        raise ValueError(f"Both start_anchor and end_anchor are required for {method}")
+   
+    if method == "compresssion":
+        start_anchor = None
+        end_anchor = None
+
     return register_plugin_function(
         plugin_path=Path(__file__).parent,
         function_name="optimize_assembly_expr",

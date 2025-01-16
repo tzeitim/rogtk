@@ -177,7 +177,7 @@ fn read_fasta_sequences(fasta_path: &Path) -> Result<Vec<DnaString>> {
             if seq_str.bytes().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
                 Some(DnaString::from_dna_string(&seq_str))
             } else {
-                warn!("Skipping sequence with invalid characters: {}", record.id());
+                //warn!("Skipping sequence with invalid characters: {}", record.id());
                 None
             }
         })
@@ -222,7 +222,7 @@ pub fn assemble_sequences(
             if seq.bytes().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
                 Some(DnaString::from_dna_string(&seq))
             } else {
-                warn!("Skipping sequence with invalid characters");
+                //warn!("Skipping sequence with invalid characters");
                 None
             }
         })
@@ -270,7 +270,9 @@ pub fn assemble_sequences(
     if only_largest.unwrap_or(false) {
         if let Some(largest) = filtered_contigs.into_iter()
             .max_by_key(|contig| contig.len()) {
+            //    warn!("contigo o sin ti\n{}", largest);
             Ok(vec![largest])
+            // hereeeeee Ok(vec!["REPEATK".to_string()])
         } else {
             Ok(Vec::new())
         }
@@ -407,6 +409,7 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
                 }
                 
                 Ok(vec![result.assembled_sequence])
+                //Ok(vec![result.assembled_sequence])
             },
             Err(e) => {
                 debug!("Path finding failed: {}", e);

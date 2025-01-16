@@ -32,10 +32,6 @@ impl AssemblyMethod {
         -> Result<Self, String> {
         match method {
             "compression" => {
-                // For compression method, anchors should not be provided
-                if start_anchor.is_some() || end_anchor.is_some() {
-                    return Err("Anchor sequences should not be provided for compression method".to_string());
-                }
                 Ok(AssemblyMethod::Compression)
             },
             "shortest_path" => {
@@ -163,8 +159,7 @@ pub fn find_shortest_path(
         debug!("Analyzing start node {}/{}: {:?}", i + 1, start_nodes.len(), graph[start]);
         
         // Run Dijkstra's algorithm from this start node
-        let distances = dijkstra(graph, start, None, |e| *e.weight());
-
+        let mut distances = dijkstra(graph, start, None, |e| *e.weight());
 
         debug!("Completed Dijkstra's algorithm from start node {}, found {} reachable nodes", 
                i + 1, distances.len());
@@ -172,9 +167,9 @@ pub fn find_shortest_path(
         // Check all possible end nodes
         for (j, &end) in end_nodes.iter().enumerate() {
 
-            debug!("Distances computed for start node {} -> end node {}:", i + 1, j + 1);
+            //debug!("Distances computed for start node {} -> end node {}:", i + 1, j + 1);
             for (node, dist) in &distances {
-                debug!("  Node {:?} -> Distance: {}", graph[*node], dist);
+              //   debug!("  Node {:?} -> Distance: {}", graph[*node], dist);
             }
 
             if let Some(weight) = distances.get(&end) {
@@ -220,11 +215,13 @@ pub fn find_shortest_path(
                     
                     info!("Updated best path: length={}, total_weight={}", 
                           path.len(), weight);
+                    path.clear()
                 }
             } else {
                 debug!("No path found to end node {}/{}", j + 1, end_nodes.len());
             }
         }
+    distances.clear();
     }
     
     match &best_path {
