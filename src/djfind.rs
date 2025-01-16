@@ -7,13 +7,13 @@ use log::*;
 use std::fmt::Debug;
 use serde::Deserialize;
 
-#[allow(dead_code)]
-pub struct PathFindingResult {
-    pub path: Vec<String>,
-    pub total_weight: f64,
-    pub mean_coverage: f64,
-    pub assembled_sequence: String,
-}
+//#[allow(dead_code)]
+//pub struct PathFindingResult {
+//    pub path: Vec<String>,
+//    pub total_weight: f64,
+//    pub mean_coverage: f64,
+//    pub assembled_sequence: String,
+//}
 
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,13 +168,78 @@ fn find_anchor_nodes(
     (start_nodes, end_nodes)
 }
 
+// Helper function to estimate path capacity
+fn estimate_path_capacity(
+    distances: &HashMap<NodeIndex, f64>,
+    graph: &DiGraph<NodeData, f64>
+) -> usize {
+    // Estimate based on average distance and graph density
+    let avg_distance = distances.values().sum::<f64>() / distances.len() as f64;
+    let graph_density = graph.edge_count() as f64 / (graph.node_count() * graph.node_count()) as f64;
+    
+    // Heuristic formula: higher density or distance suggests longer paths
+    ((avg_distance * graph_density * 2.0) as usize).max(10).min(graph.node_count())
+}
+
+// Helper struct for path reconstruction to avoid repeated allocations
+struct PathReconstructor<'a> {
+    graph: &'a DiGraph<NodeData, f64>,
+    distances: &'a HashMap<NodeIndex, f64>,
+    path: Vec<NodeIndex>,
+}
+
+impl<'a> PathReconstructor<'a> {
+    fn new(graph: &'a DiGraph<NodeData, f64>, distances: &'a HashMap<NodeIndex, f64>) -> Self {
+        let capacity = estimate_path_capacity(distances, graph);
+        Self {
+            graph,
+            distances,
+            path: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn reconstruct(&mut self, start: NodeIndex, end: NodeIndex) -> Option<Vec<NodeIndex>> {
+        self.path.clear();  // Reuse existing allocation
+        self.path.push(end);
+        
+        let mut current = end;
+        
+        while current != start {
+            let next = self.find_next_node(current)?;
+            current = next;
+            self.path.push(current);
+        }
+        
+        self.path.reverse();
+        Some(self.path.clone())
+    }
+
+    fn find_next_node(&self, current: NodeIndex) -> Option<NodeIndex> {
+        let mut min_prev = None;
+        let mut min_weight = f64::INFINITY;
+        
+        for neighbor in self.graph.neighbors_directed(current, petgraph::Direction::Incoming) {
+            if let Some(dist) = self.distances.get(&neighbor) {
+                let edge_weight = self.graph
+                    .edge_weight(self.graph.find_edge(neighbor, current)?)?;
+                if dist + edge_weight < min_weight {
+                    min_weight = dist + edge_weight;
+                    min_prev = Some(neighbor);
+                }
+            }
+        }
+        
+        min_prev
+    }
+}
+
 pub fn find_shortest_path(
     graph: &DiGraph<NodeData, f64>,
     start_nodes: &[NodeIndex],
     end_nodes: &[NodeIndex],
 ) -> Option<(Vec<NodeIndex>, f64)> {
     let _ = env_logger::try_init();
-    info!("==================Starting shortest path search with {} start nodes and {} end nodes", 
+    info!("Starting shortest path search with {} start nodes and {} end nodes", 
           start_nodes.len(), end_nodes.len());
     
     let mut best_path = None;
@@ -183,8 +248,9 @@ pub fn find_shortest_path(
     for (i, &start) in start_nodes.iter().enumerate() {
         debug!("Analyzing start node {}/{}: {:?}", i + 1, start_nodes.len(), graph[start].sequence);
         
-        {   // New block for distances scope
+        {   // Block for distances and path reconstruction scope
             let distances = dijkstra(graph, start, None, |e| *e.weight());
+            let mut reconstructor = PathReconstructor::new(graph, &distances);
             
             debug!("Completed Dijkstra's algorithm from start node {}, found {} reachable nodes", 
                    i + 1, distances.len());
@@ -198,50 +264,21 @@ pub fn find_shortest_path(
                         debug!("New best path found with weight {} (previous best: {})", 
                                weight, min_total_weight);
                         
-                        let path = {
-                            let mut path = Vec::with_capacity(graph.node_count());
-                            let mut current = end;
-                            path.push(current);
+                        if let Some(path) = reconstructor.reconstruct(start, end) {
+                            min_total_weight = *weight;
+                            best_path = Some((path, *weight));
                             
-                            while current != start {
-                                let mut min_prev = None;
-                                let mut min_weight = f64::INFINITY;
-                                
-                                for neighbor in graph.neighbors_directed(current, petgraph::Direction::Incoming) {
-                                    if let Some(dist) = distances.get(&neighbor) {
-                                        let edge_weight = graph.edge_weight(graph.find_edge(neighbor, current).unwrap()).unwrap();
-                                        if dist + edge_weight < min_weight {
-                                            min_weight = dist + edge_weight;
-                                            min_prev = Some(neighbor);
-                                        }
-                                    }
-                                }
-                                
-                                if let Some(prev) = min_prev {
-                                    current = prev;
-                                    path.push(current);
-                                    trace!("Added node to path: {:?}", graph[current].sequence);
-                                } else {
-                                    warn!("Path reconstruction failed: couldn't find previous node");
-                                    break;
-                                }
-                            }
-                            
-                            path.reverse();
-                            path
-                        };
-                        
-                        min_total_weight = *weight;
-                        best_path = Some((path, *weight));
-                        
-                        info!("Updated best path: length={}, total_weight={}", 
-                              best_path.as_ref().unwrap().0.len(), weight);
+                            info!("Updated best path: length={}, total_weight={}", 
+                                  best_path.as_ref().unwrap().0.len(), weight);
+                        } else {
+                            warn!("Path reconstruction failed");
+                        }
                     }
                 } else {
                     debug!("No path found to end node {}/{}", j + 1, end_nodes.len());
                 }
             }
-        }
+        } // distances and reconstructor are dropped here
     }
     
     match &best_path {
@@ -255,8 +292,7 @@ pub fn find_shortest_path(
     }
     
     best_path
-}
-
+} 
 pub fn extract_path_sequences(
     graph: &DiGraph<NodeData, f64>,
     path: &[NodeIndex],
@@ -265,15 +301,118 @@ pub fn extract_path_sequences(
         .map(|&idx| graph[idx].sequence.clone())
         .collect()
 }
+//#####################
+#[derive(Debug)]
+pub enum AssemblyHistory {
+    Full {
+        path: Vec<String>,
+        total_weight: f64,
+        mean_coverage: f64,
+    },
+    Minimal {
+        node_count: usize,
+        total_weight: f64,
+        mean_coverage: f64,
+    }
+}
+
+impl Drop for AssemblyHistory {
+    fn drop(&mut self) {
+        if let AssemblyHistory::Full { path, .. } = self {
+            path.clear(); // Explicitly clear the vector before dropping
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PathFindingResult {
+    pub assembled_sequence: String,
+    pub history: AssemblyHistory,
+}
+
+impl PathFindingResult {
+    // Constructor for full history
+    pub fn with_full_history(
+        path: Vec<String>,
+        total_weight: f64,
+        mean_coverage: f64,
+        assembled_sequence: String,
+    ) -> Self {
+        Self {
+            assembled_sequence,
+            history: AssemblyHistory::Full {
+                path,
+                total_weight,
+                mean_coverage,
+            },
+        }
+    }
+
+    // Constructor for minimal history
+    pub fn with_minimal_history(
+        node_count: usize,
+        total_weight: f64,
+        mean_coverage: f64,
+        assembled_sequence: String,
+    ) -> Self {
+        Self {
+            assembled_sequence,
+            history: AssemblyHistory::Minimal {
+                node_count,
+                total_weight,
+                mean_coverage,
+            },
+        }
+    }
+
+    // Helper method to get statistics regardless of history type
+    pub fn get_stats(&self) -> (f64, f64) {
+        match &self.history {
+            AssemblyHistory::Full { total_weight, mean_coverage, .. } => {
+                (*total_weight, *mean_coverage)
+            },
+            AssemblyHistory::Minimal { total_weight, mean_coverage, .. } => {
+                (*total_weight, *mean_coverage)
+            }
+        }
+    }
+
+    // Helper method to get path length
+    pub fn path_length(&self) -> usize {
+        match &self.history {
+            AssemblyHistory::Full { path, .. } => path.len(),
+            AssemblyHistory::Minimal { node_count, .. } => *node_count,
+        }
+    }
+
+    // Optional: Method to convert full history to minimal
+    pub fn minimize_history(&mut self) {
+        if let AssemblyHistory::Full {ref path, total_weight, mean_coverage } = std::mem::replace(&mut self.history, AssemblyHistory::Minimal {
+            node_count: 0,
+            total_weight: 0.0,
+            mean_coverage: 0.0,
+        }) {
+            self.history = AssemblyHistory::Minimal {
+                node_count: path.len(),
+                total_weight,
+                mean_coverage,
+            };
+        }
+    }
+}
 
 pub fn assemble_with_path_finding<K: Kmer + Send + Sync + Debug + 'static>(
     preliminary_graph: &DebruijnGraph<K, u16>,
     start_anchor: &str,
     end_anchor: &str,
+        keep_full_history: Option<bool>,  // Make it optional
+
 ) -> Result<PathFindingResult, String> {
     let _ = env_logger::try_init();
     info!("Converting de Bruijn graph to weighted digraph for path finding");
     
+    let keep_history = keep_full_history.unwrap_or(true);
+
     // Convert to petgraph
     let (pg, _node_map) = convert_to_petgraph(preliminary_graph);
     
@@ -293,20 +432,29 @@ pub fn assemble_with_path_finding<K: Kmer + Send + Sync + Debug + 'static>(
     if let Some((path, total_weight)) = find_shortest_path(&pg, &start_nodes, &end_nodes) {
         let sequences = extract_path_sequences(&pg, &path);
         let mean_coverage = 1.0 / (total_weight / path.len() as f64);
-
         let assembled_sequence = concatenate_path_sequences(&sequences, K::k());
 
         info!("Found path with total weight {} and mean coverage {}", 
-              total_weight, mean_coverage);
-
+            total_weight, mean_coverage);
         info!("Assembled sequence length: {}", assembled_sequence.len());
-        
-        Ok(PathFindingResult {
-            path: sequences,
-            total_weight,
-            mean_coverage,
-            assembled_sequence,
-        })
+
+        let result = if keep_full_history.expect("expected a boolean") {
+            PathFindingResult::with_full_history(
+                sequences,
+                total_weight,
+                mean_coverage,
+                assembled_sequence,
+            )
+        } else {
+            PathFindingResult::with_minimal_history(
+                sequences.len(),
+                total_weight,
+                mean_coverage,
+                assembled_sequence,
+            )
+        };
+
+        Ok(result)
     } else {
         Err("No valid path found between anchors".to_string())
     }

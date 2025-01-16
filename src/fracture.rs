@@ -392,16 +392,16 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
 
         info!("Starting path finding assembly with anchors: {} -> {}", start_anchor, end_anchor);
         
-        match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor) {
+        match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor, None ) {
             Ok(result) => {
-                info!("Path finding succeeded - found path of {} nodes", result.path.len());
+                //info!("Path finding succeeded - found path of {} nodes", result.path.len());
 
                 if should_export {
                     // Export path sequences to CSV
                     let path_path = format!("{}_path.csv", prefix);
                     let mut path_df = DataFrame::new(vec![
-                        Series::new("sequence".into(), &result.path),
-                        Series::new("coverage".into(), vec![1; result.path.len()]),
+                 //       Series::new("sequence".into(), &result.path),
+                  //      Series::new("coverage".into(), vec![1; result.path.len()]),
                     ])?;
                     CsvWriter::new(File::create(path_path)?)
                         .finish(&mut path_df)?;
