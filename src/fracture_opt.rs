@@ -139,6 +139,7 @@ pub fn optimize_assembly(
     
     // Update best results
     if current.has_anchors {
+        debug!("Current seq {}", current.contig);
         best_anchored_result = Some(current.clone());
     }
     if best_length_result.as_ref().map_or(true, |r| current.length > r.length) {
