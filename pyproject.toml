@@ -22,5 +22,7 @@ test = [
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+module-name = "rogtk"
+binding = "pyo3"
 #rust-toolchain = "stable"
 #args = ["--force"]
