@@ -2,13 +2,17 @@
 ##requires = ["setuptools", "wheel", "setuptools-rust", "maturin>=1.0,<2.0", "polars>=0.20.6"]
 ##build-backend = "maturin"
 [build-system]
-requires = ["maturin>=1.0,<2.0", "polars>=0.20.6"]
+requires = ["maturin>=1.0,<2.0", "polars>=1.25,!=1.26.*,<1.28"]
+
 build-backend = "maturin"
 
 [project]
 name = "rogtk"
-version = "0.1.9"
-requires-python = ">=3.8"
+version = "0.1.10"
+requires-python = ">=3.10"
+dependencies = [
+    "polars>=1.25,!=1.26.*,<1.28"
+]
 classifiers = [
   "Programming Language :: Rust",
   "Programming Language :: Python :: Implementation :: CPython",
