@@ -6,6 +6,16 @@ from polars.plugins import register_plugin_function
 from polars.type_aliases import IntoExpr
 from .utils import *
 
+from rogtk.rogtk import (
+    sum_as_string,
+    oparse_cigar,
+    merge_paired_fastqs,
+    parse_paired_fastqs,
+    fastq_to_parquet,
+    fracture_fasta,
+    fracture_sequences
+)
+
 #@pl.api.register_expr_namespace("cigar")
 def parse_cigar(expr: IntoExpr, block_dels: bool=False) -> pl.Expr:
     """mr cigar"""

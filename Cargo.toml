@@ -1,6 +1,6 @@
 [package]
 name = "rogtk"
-version = "0.1.9"
+version = "0.1.10"
 authors = [
   "Pedro Olivares Chauvet <pedro.olivares@mdc-berlin.de>", 
   "Pedro Olivares Chauvet <pedro.olivares@weizmann.ac.il>", 
@@ -8,9 +8,16 @@ authors = [
 edition = "2018"
 
 [lib]
-name = "rogtk"
+name = "_internal"
 crate-type = ["cdylib"]
 
+[package.metadata.maturin]
+name = "rogtk._internal"
+
+[profile.release]
+lto = true
+strip = "symbols"
+codegen-units = 1
 
 [dependencies]
 
