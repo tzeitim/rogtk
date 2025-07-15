@@ -17,7 +17,7 @@ from rogtk.rogtk import (
     bam_to_parquet
 )
 
-#@pl.api.register_expr_namespace("dna")
+@pl.api.register_expr_namespace("dna")
 def reverse_complement(expr: IntoExpr) -> pl.Expr:
     """Generate reverse complement of DNA sequences."""
     return register_plugin_function(
