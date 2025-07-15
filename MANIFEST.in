@@ -1,2 +1,0 @@
-include rogtk/Cargo.toml
-recursive-include rogtk/src *
