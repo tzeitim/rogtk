@@ -13,8 +13,19 @@ from rogtk.rogtk import (
     parse_paired_fastqs,
     fastq_to_parquet,
     fracture_fasta,
-    fracture_sequences
+    fracture_sequences,
+    bam_to_parquet
 )
+
+@pl.api.register_expr_namespace("dna")
+def reverse_complement(expr: IntoExpr) -> pl.Expr:
+    """Generate reverse complement of DNA sequences."""
+    return register_plugin_function(
+        plugin_path=Path(__file__).parent,
+        function_name="reverse_complement_series",
+        args=expr,
+        is_elementwise=True,
+    )
 
 #@pl.api.register_expr_namespace("cigar")
 def parse_cigar(expr: IntoExpr, block_dels: bool=False) -> pl.Expr:

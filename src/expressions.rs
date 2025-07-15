@@ -422,4 +422,26 @@ fn sweep_assembly_params_expr(inputs: &[Series], kwargs: SweepParams) -> PolarsR
     Ok(df.into_struct(inputs[0].name().clone()).into())
 }
 
+#[polars_expr(output_type=String)]
+fn reverse_complement_series(inputs: &[Series]) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let out: StringChunked = ca.apply_into_string_amortized(|value, output| {
+        reverse_complement_to_output(value, output);
+    });
+    Ok(out.into_series())
+}
+
+fn reverse_complement_to_output(dna: &str, output: &mut String) {
+    for c in dna.chars().rev() {
+        match c {
+            'A' => output.push('T'),
+            'T' => output.push('A'),
+            'C' => output.push('G'),
+            'G' => output.push('C'),
+            'N' => output.push('N'),
+            _ => output.push(c), 
+        }
+    }
+}
+
 
