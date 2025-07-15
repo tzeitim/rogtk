@@ -21,9 +21,11 @@ mod fracture;
 mod graph_viz;
 mod fracture_opt;
 mod djfind;
+mod bam;
 
 use crate::single_fastq::{fastq_to_parquet};
 use crate::fracture::{fracture_fasta, fracture_sequences};
+use crate::bam::{bam_to_parquet};
 
 
 //extern crate fasten;
@@ -462,9 +464,10 @@ fn rogtk(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(merge_paired_fastqs, m)?)?;
     m.add_function(wrap_pyfunction!(parse_paired_fastqs, m)?)?;
     m.add_function(wrap_pyfunction!(fastq_to_parquet, m)?)?;
-    // fracture (de Bruijn Graph assebly)
     m.add_function(wrap_pyfunction!(fracture_fasta, m)?)?;
     m.add_function(wrap_pyfunction!(fracture_sequences, m)?)?;
+    m.add_function(wrap_pyfunction!(bam_to_parquet, m)?)?;
+
     //m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

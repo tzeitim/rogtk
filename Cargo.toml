@@ -1,6 +1,6 @@
 [package]
 name = "rogtk"
-version = "0.1.10"
+version = "0.1.11"
 authors = [
   "Pedro Olivares Chauvet <pedro.olivares@mdc-berlin.de>", 
   "Pedro Olivares Chauvet <pedro.olivares@weizmann.ac.il>", 
@@ -35,6 +35,7 @@ chrono = "=0.4.38"
 pyo3-polars = { version = "0.17.0", features = ["derive", "dtype-struct", "dtype-decimal", "dtype-array"] }
 serde = { version = "1", features = ["derive"] }
 target-lexicon = "0.12.14"
+noodles = { version = "0.82", features = ["bam", "sam", "bgzf"] }
 
 #DBGraphs
 bio = "2.0.3"
