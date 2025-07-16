@@ -18,14 +18,18 @@ from rogtk.rogtk import (
 )
 
 @pl.api.register_expr_namespace("dna")
-def reverse_complement(expr: IntoExpr) -> pl.Expr:
-    """Generate reverse complement of DNA sequences."""
-    return register_plugin_function(
-        plugin_path=Path(__file__).parent,
-        function_name="reverse_complement_series",
-        args=expr,
-        is_elementwise=True,
-    )
+class DnaNamespace:
+    def __init__(self, expr: pl.Expr):
+        self._expr = expr
+    
+    def reverse_complement(self) -> pl.Expr:
+        """Generate reverse complement of DNA sequences."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="reverse_complement_series",
+            args=self._expr,
+            is_elementwise=True,
+        )
 
 #@pl.api.register_expr_namespace("cigar")
 def parse_cigar(expr: IntoExpr, block_dels: bool=False) -> pl.Expr:
