@@ -446,12 +446,7 @@ fn reverse_complement_to_output(dna: &str, output: &mut String) {
 }
 
 ///####
-///
-//
-// Fixed Rust expressions with both fuzzy approaches
 
-
-// Helper function to generate fuzzy patterns in Rust
 fn generate_fuzzy_pattern(string: &str, wildcard: &str, include_original: bool, max_length: usize) -> String {
     if string.is_empty() {
         return string.to_string();
@@ -472,6 +467,12 @@ fn generate_fuzzy_pattern(string: &str, wildcard: &str, include_original: bool, 
                 .collect::<Vec<String>>()
                 .join("");
             fuzz.push(variant);
+        }
+        
+        // Add end-substitution pattern: replace last character with .
+        if string.len() > 0 {
+            let end_substitution = format!("{}.", &string[..string.len()-1]);
+            fuzz.push(end_substitution);
         }
     }
     
@@ -498,6 +499,7 @@ struct FuzzyKwargs {
     wildcard: Option<String>,
     include_original: Option<bool>,
     max_length: Option<usize>,
+    replace_all: Option<bool>,
 }
 
 // Hamming distance functions
@@ -652,6 +654,7 @@ fn fuzzy_replace_native_expr(inputs: &[Series], kwargs: FuzzyKwargs) -> PolarsRe
     let wildcard = kwargs.wildcard.as_deref().unwrap_or(".{0,1}");
     let include_original = kwargs.include_original.unwrap_or(true);
     let max_length = kwargs.max_length.unwrap_or(100);
+    let replace_all = kwargs.replace_all.unwrap_or(false);  // DEFAULT TO FALSE (replace only)
     
     // Generate fuzzy pattern in Rust
     let pattern = generate_fuzzy_pattern(target, wildcard, include_original, max_length);
@@ -661,7 +664,11 @@ fn fuzzy_replace_native_expr(inputs: &[Series], kwargs: FuzzyKwargs) -> PolarsRe
     })?;
     
     let out: StringChunked = ca.apply_into_string_amortized(|value, output| {
-        let result = re.replace_all(value, replacement);
+        let result = if replace_all {
+            re.replace_all(value, replacement)
+        } else {
+            re.replace(value, replacement)  
+        };
         output.push_str(&result);
     });
     

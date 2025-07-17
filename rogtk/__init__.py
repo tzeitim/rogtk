@@ -274,8 +274,10 @@ class FuzzyExpr:
             },
             is_elementwise=True,
         )
-    
-    def replace_target(self, target: str, replacement: str = "[FUZZY_MATCH]", wildcard: str = ".{0,1}", include_original: bool = True, max_length: int = 100) -> pl.Expr:
+
+    def replace_target(self, target: str, replacement: str, 
+                      wildcard: str = ".{0,1}", include_original: bool = True, 
+                      max_length: int = 100, replace_all: bool = False) -> pl.Expr:
         """Replace fuzzy matches of target (pattern generated in Rust)."""
         return register_plugin_function(
             plugin_path=Path(__file__).parent,
@@ -286,7 +288,8 @@ class FuzzyExpr:
                 "replacement": replacement,
                 "wildcard": wildcard, 
                 "include_original": include_original,
-                "max_length": max_length
+                "max_length": max_length,
+                "replace_all": replace_all
             },
             is_elementwise=True,
         )
