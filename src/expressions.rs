@@ -445,8 +445,10 @@ fn reverse_complement_to_output(dna: &str, output: &mut String) {
     }
 }
 
-///####
-
+/////////////////////////
+// Helper function to generate fuzzy patterns in Rust
+//
+//
 fn generate_fuzzy_pattern(string: &str, wildcard: &str, include_original: bool, max_length: usize) -> String {
     if string.is_empty() {
         return string.to_string();
@@ -479,6 +481,7 @@ fn generate_fuzzy_pattern(string: &str, wildcard: &str, include_original: bool, 
     fuzz.join("|")
 }
 
+
 #[derive(Deserialize, Debug)]
 struct HammingKwargs {
     target: String,
@@ -493,7 +496,15 @@ struct FuzzyReplaceKwargs {
 }
 
 #[derive(Deserialize, Debug)]
-struct FuzzyKwargs {
+struct FuzzyMatchKwargs {
+    target: String,
+    wildcard: Option<String>,
+    include_original: Option<bool>,
+    max_length: Option<usize>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FuzzyReplaceNativeKwargs {
     target: String,
     replacement: String,
     wildcard: Option<String>,
@@ -619,50 +630,48 @@ fn fuzzy_contains_expr(inputs: &[Series], kwargs: FuzzyReplaceKwargs) -> PolarsR
     }
 }
 
-// Fuzzy pattern functions with Rust-generated patterns
 #[polars_expr(output_type=Boolean)]
-fn fuzzy_contains_native_expr(inputs: &[Series], kwargs: FuzzyKwargs) -> PolarsResult<Series> {
+fn fuzzy_contains_native_expr(inputs: &[Series], kwargs: FuzzyMatchKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
     let target = &kwargs.target;
     let wildcard = kwargs.wildcard.as_deref().unwrap_or(".{0,1}");
     let include_original = kwargs.include_original.unwrap_or(true);
     let max_length = kwargs.max_length.unwrap_or(100);
-    
+
     // Generate fuzzy pattern in Rust
     let pattern = generate_fuzzy_pattern(target, wildcard, include_original, max_length);
-    
+
     let re = regex::Regex::new(&pattern).map_err(|e| {
         PolarsError::ComputeError(format!("Invalid regex pattern: {}", e).into())
     })?;
-    
+
     let results: Vec<Option<bool>> = ca.iter().map(|value_opt| {
         match value_opt {
             Some(value) => Some(re.is_match(value)),
             None => None,
         }
     }).collect();
-    
+
     let out = BooleanChunked::from_iter_options(ca.name().clone(), results.into_iter());
     Ok(out.into_series())
 }
 
 #[polars_expr(output_type=String)]
-fn fuzzy_replace_native_expr(inputs: &[Series], kwargs: FuzzyKwargs) -> PolarsResult<Series> {
+fn fuzzy_replace_native_expr(inputs: &[Series], kwargs: FuzzyReplaceNativeKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
     let target = &kwargs.target;
     let replacement = &kwargs.replacement;
     let wildcard = kwargs.wildcard.as_deref().unwrap_or(".{0,1}");
     let include_original = kwargs.include_original.unwrap_or(true);
     let max_length = kwargs.max_length.unwrap_or(100);
-    let replace_all = kwargs.replace_all.unwrap_or(false);  // DEFAULT TO FALSE (replace only)
-    
-    // Generate fuzzy pattern in Rust
+    let replace_all = kwargs.replace_all.unwrap_or(false);    
+
     let pattern = generate_fuzzy_pattern(target, wildcard, include_original, max_length);
-    
+
     let re = regex::Regex::new(&pattern).map_err(|e| {
         PolarsError::ComputeError(format!("Invalid regex pattern: {}", e).into())
     })?;
-    
+
     let out: StringChunked = ca.apply_into_string_amortized(|value, output| {
         let result = if replace_all {
             re.replace_all(value, replacement)
@@ -671,6 +680,6 @@ fn fuzzy_replace_native_expr(inputs: &[Series], kwargs: FuzzyKwargs) -> PolarsRe
         };
         output.push_str(&result);
     });
-    
+
     Ok(out.into_series())
 }
