@@ -207,3 +207,89 @@ def optimize_assembly(
         returns_scalar=True,
         is_elementwise=False,
     )
+
+@pl.api.register_expr_namespace("hamming")
+class HammingExpr:
+    def __init__(self, expr: pl.Expr):
+        self._expr = expr
+    
+    def distance(self, target: str) -> pl.Expr:
+        """Calculate Hamming distance to target sequence."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="hamming_distance_expr",
+            args=self._expr,
+            kwargs={"target": target},
+            is_elementwise=True,
+        )
+    
+    def within(self, target: str, max_distance: int = 1) -> pl.Expr:
+        """Check if sequence is within Hamming distance of target."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="hamming_within_expr", 
+            args=self._expr,
+            kwargs={"target": target, "max_distance": max_distance},
+            is_elementwise=True,
+        )
+
+@pl.api.register_expr_namespace("fuzzy")
+class FuzzyExpr:
+    def __init__(self, expr: pl.Expr):
+        self._expr = expr
+    
+    # Option 1: Pre-generated patterns (use with fuzzy_match_str)
+    def replace(self, pattern: str, replacement: str, literal: bool = False) -> pl.Expr:
+        """Replace fuzzy pattern matches in sequences (use with fuzzy_match_str)."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="fuzzy_replace_expr",
+            args=self._expr,
+            kwargs={"pattern": pattern, "replacement": replacement, "literal": literal},
+            is_elementwise=True,
+        )
+    
+    def contains(self, pattern: str, literal: bool = False) -> pl.Expr:
+        """Check if sequence contains fuzzy pattern (use with fuzzy_match_str)."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="fuzzy_contains_expr",
+            args=self._expr,
+            kwargs={"pattern": pattern, "literal": literal},
+            is_elementwise=True,
+        )
+    
+    # Option 2: Native Rust pattern generation
+    def match(self, target: str, wildcard: str = ".{0,1}", include_original: bool = True, max_length: int = 100) -> pl.Expr:
+        """Check if sequence fuzzy matches target (pattern generated in Rust)."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="fuzzy_contains_native_expr",
+            args=self._expr,
+            kwargs={
+                "target": target, 
+                "wildcard": wildcard, 
+                "include_original": include_original,
+                "max_length": max_length
+            },
+            is_elementwise=True,
+        )
+
+    def replace_target(self, target: str, replacement: str, 
+                      wildcard: str = ".{0,1}", include_original: bool = True, 
+                      max_length: int = 100, replace_all: bool = False) -> pl.Expr:
+        """Replace fuzzy matches of target (pattern generated in Rust)."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="fuzzy_replace_native_expr",
+            args=self._expr,
+            kwargs={
+                "target": target,
+                "replacement": replacement,
+                "wildcard": wildcard, 
+                "include_original": include_original,
+                "max_length": max_length,
+                "replace_all": replace_all
+            },
+            is_elementwise=True,
+        )

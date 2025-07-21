@@ -1,6 +1,7 @@
-use serde::Deserialize;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
+use serde::Deserialize;
+
 use crate::fracture::assemble_sequences;
 use crate::djfind::AssemblyMethod;
 
@@ -444,4 +445,241 @@ fn reverse_complement_to_output(dna: &str, output: &mut String) {
     }
 }
 
+/////////////////////////
+// Helper function to generate fuzzy patterns in Rust
+//
+//
+fn generate_fuzzy_pattern(string: &str, wildcard: &str, include_original: bool, max_length: usize) -> String {
+    if string.is_empty() {
+        return string.to_string();
+    }
+    
+    let mut fuzz = Vec::new();
+    
+    if include_original {
+        fuzz.push(string.to_string());
+    }
+    
+    // Skip fuzzy generation for very long strings to avoid performance issues
+    if string.len() <= max_length {
+        for i in 0..string.len() {
+            let variant: String = string.chars()
+                .enumerate()
+                .map(|(j, c)| if i == j { wildcard.to_string() } else { c.to_string() })
+                .collect::<Vec<String>>()
+                .join("");
+            fuzz.push(variant);
+        }
+        
+        // Add end-substitution pattern: replace last character with .
+        if string.len() > 0 {
+            let end_substitution = format!("{}.", &string[..string.len()-1]);
+            fuzz.push(end_substitution);
+        }
+    }
+    
+    fuzz.join("|")
+}
 
+
+#[derive(Deserialize, Debug)]
+struct HammingKwargs {
+    target: String,
+    max_distance: Option<u32>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FuzzyReplaceKwargs {
+    pattern: String,
+    replacement: String,
+    literal: Option<bool>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FuzzyMatchKwargs {
+    target: String,
+    wildcard: Option<String>,
+    include_original: Option<bool>,
+    max_length: Option<usize>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FuzzyReplaceNativeKwargs {
+    target: String,
+    replacement: String,
+    wildcard: Option<String>,
+    include_original: Option<bool>,
+    max_length: Option<usize>,
+    replace_all: Option<bool>,
+}
+
+// Hamming distance functions
+#[polars_expr(output_type=UInt32)]
+fn hamming_distance_expr(inputs: &[Series], kwargs: HammingKwargs) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let target = &kwargs.target;
+    let target_chars: Vec<char> = target.chars().collect();
+    
+    let results: Vec<Option<u32>> = ca.iter().map(|seq_opt| {
+        match seq_opt {
+            Some(seq) => {
+                if seq.len() != target.len() { 
+                    Some(u32::MAX) // Different lengths = invalid
+                } else {
+                    let distance: u32 = seq.chars()
+                       .zip(target_chars.iter())
+                       .map(|(a, b)| if a != *b { 1u32 } else { 0u32 })
+                       .sum();
+                    Some(distance)
+                }
+            }
+            None => None,
+        }
+    }).collect();
+    
+    let out = UInt32Chunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+#[polars_expr(output_type=Boolean)]
+fn hamming_within_expr(inputs: &[Series], kwargs: HammingKwargs) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let target = &kwargs.target;
+    let max_dist = kwargs.max_distance.unwrap_or(1);
+    let target_chars: Vec<char> = target.chars().collect();
+    
+    let results: Vec<Option<bool>> = ca.iter().map(|seq_opt| {
+        match seq_opt {
+            Some(seq) => {
+                if seq.len() != target.len() { 
+                    Some(false) 
+                } else {
+                    let distance: u32 = seq.chars()
+                       .zip(target_chars.iter())
+                       .map(|(a, b)| if a != *b { 1u32 } else { 0u32 })
+                       .sum();
+                    Some(distance <= max_dist)
+                }
+            }
+            None => None,
+        }
+    }).collect();
+    
+    let out = BooleanChunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+// Fuzzy pattern functions with pre-generated patterns
+#[polars_expr(output_type=String)]
+fn fuzzy_replace_expr(inputs: &[Series], kwargs: FuzzyReplaceKwargs) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let pattern = &kwargs.pattern;
+    let replacement = &kwargs.replacement;
+    let literal = kwargs.literal.unwrap_or(false);
+    
+    if literal {
+        // Simple string replacement
+        let out: StringChunked = ca.apply_into_string_amortized(|value, output| {
+            output.push_str(&value.replace(pattern, replacement));
+        });
+        Ok(out.into_series())
+    } else {
+        // Regex replacement - compile once for efficiency
+        let re = regex::Regex::new(pattern).map_err(|e| {
+            PolarsError::ComputeError(format!("Invalid regex pattern: {}", e).into())
+        })?;
+        
+        let out: StringChunked = ca.apply_into_string_amortized(|value, output| {
+            let result = re.replace_all(value, replacement);
+            output.push_str(&result);
+        });
+        Ok(out.into_series())
+    }
+}
+
+#[polars_expr(output_type=Boolean)]
+fn fuzzy_contains_expr(inputs: &[Series], kwargs: FuzzyReplaceKwargs) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let pattern = &kwargs.pattern;
+    let literal = kwargs.literal.unwrap_or(false);
+    
+    if literal {
+        let results: Vec<Option<bool>> = ca.iter().map(|value_opt| {
+            match value_opt {
+                Some(value) => Some(value.contains(pattern)),
+                None => None,
+            }
+        }).collect();
+        
+        let out = BooleanChunked::from_iter_options(ca.name().clone(), results.into_iter());
+        Ok(out.into_series())
+    } else {
+        let re = regex::Regex::new(pattern).map_err(|e| {
+            PolarsError::ComputeError(format!("Invalid regex pattern: {}", e).into())
+        })?;
+        
+        let results: Vec<Option<bool>> = ca.iter().map(|value_opt| {
+            match value_opt {
+                Some(value) => Some(re.is_match(value)),
+                None => None,
+            }
+        }).collect();
+        
+        let out = BooleanChunked::from_iter_options(ca.name().clone(), results.into_iter());
+        Ok(out.into_series())
+    }
+}
+
+#[polars_expr(output_type=Boolean)]
+fn fuzzy_contains_native_expr(inputs: &[Series], kwargs: FuzzyMatchKwargs) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let target = &kwargs.target;
+    let wildcard = kwargs.wildcard.as_deref().unwrap_or(".{0,1}");
+    let include_original = kwargs.include_original.unwrap_or(true);
+    let max_length = kwargs.max_length.unwrap_or(100);
+
+    // Generate fuzzy pattern in Rust
+    let pattern = generate_fuzzy_pattern(target, wildcard, include_original, max_length);
+
+    let re = regex::Regex::new(&pattern).map_err(|e| {
+        PolarsError::ComputeError(format!("Invalid regex pattern: {}", e).into())
+    })?;
+
+    let results: Vec<Option<bool>> = ca.iter().map(|value_opt| {
+        match value_opt {
+            Some(value) => Some(re.is_match(value)),
+            None => None,
+        }
+    }).collect();
+
+    let out = BooleanChunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+#[polars_expr(output_type=String)]
+fn fuzzy_replace_native_expr(inputs: &[Series], kwargs: FuzzyReplaceNativeKwargs) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let target = &kwargs.target;
+    let replacement = &kwargs.replacement;
+    let wildcard = kwargs.wildcard.as_deref().unwrap_or(".{0,1}");
+    let include_original = kwargs.include_original.unwrap_or(true);
+    let max_length = kwargs.max_length.unwrap_or(100);
+    let replace_all = kwargs.replace_all.unwrap_or(false);    
+
+    let pattern = generate_fuzzy_pattern(target, wildcard, include_original, max_length);
+
+    let re = regex::Regex::new(&pattern).map_err(|e| {
+        PolarsError::ComputeError(format!("Invalid regex pattern: {}", e).into())
+    })?;
+
+    let out: StringChunked = ca.apply_into_string_amortized(|value, output| {
+        let result = if replace_all {
+            re.replace_all(value, replacement)
+        } else {
+            re.replace(value, replacement)  
+        };
+        output.push_str(&result);
+    });
+
+    Ok(out.into_series())
+}

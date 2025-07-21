@@ -36,6 +36,7 @@ pyo3-polars = { version = "0.17.0", features = ["derive", "dtype-struct", "dtype
 serde = { version = "1", features = ["derive"] }
 target-lexicon = "0.12.14"
 noodles = { version = "0.82", features = ["bam", "sam", "bgzf"] }
+regex = "1.11.1"
 
 #DBGraphs
 bio = "2.0.3"
