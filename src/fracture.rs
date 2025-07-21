@@ -417,25 +417,48 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
 
             }
         },
+// Replace the entire ShortestPathAuto match arm in fracture.rs with this:
 
         AssemblyMethod::ShortestPathAuto => {
-            // Find all nodes with degree 1 (endpoints)
-            let endpoints: Vec<NodeId> = graph.nodes()
-                .filter(|&node_id| graph.degree(node_id) == 1)
-                .collect();
+            // Export preliminary graph if enabled
+            if should_export {
+                let prelim_path = format!("{}_preliminary.dot", prefix);
+                export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
+                info!("Exported preliminary graph to {}", prelim_path);
+            }
 
-            match endpoints.len() {
-                2 => {
-                    // Perfect case: exactly 2 endpoints
-                    let start_seq = graph.get_sequence(endpoints[0]);
-                    let end_seq = graph.get_sequence(endpoints[1]);
-                    assemble_with_path_finding(graph, &start_seq, &end_seq)
+            info!("Starting automatic path finding assembly");
+
+            match assemble_with_auto_path_finding(&preliminary_graph) {
+                Ok(result) => {
+                    info!("Auto path finding succeeded - found path of {} nodes", result.path.len());
+                    info!("Assembled sequence length: {}", result.assembled_sequence.len());
+
+                    if should_export {
+                        // Export path sequences to CSV - same format as shortest_path
+                        let path_path = format!("{}_path.csv", prefix);
+                        let mut path_df = DataFrame::new(vec![
+                            Series::new("sequence".into(), &result.path),
+                            Series::new("coverage".into(), vec![result.mean_coverage; result.path.len()]),
+                        ])?;
+                        CsvWriter::new(File::create(&path_path)?)
+                            .finish(&mut path_df)?;
+                        info!("Exported path to {}", path_path);
+
+                        // Also export a "final" graph showing just the path for consistency
+                        // This helps visualization tools work seamlessly
+                        let _final_path = format!("{}_final.dot", prefix);
+                        // TODO: Create simplified graph with just the path nodes
+                        info!("Note: Final graph export not yet implemented for auto mode");
+                    }
+
+                    Ok(vec![result.assembled_sequence])
                 },
-                0 => Err("No endpoints found - circular contig or complex structure".to_string()),
-                1 => Err("Only one endpoint found - incomplete contig".to_string()),
-                _ => {
-                    // Multiple endpoints - choose the pair with highest coverage path
-                    find_best_endpoint_pair(graph, endpoints)
+                Err(e) => {
+                    error!("Auto path finding failed: {}", e);
+                    // Return empty vector instead of propagating error
+                    // This matches behavior of shortest_path when anchors aren't found
+                    Ok(Vec::new())
                 }
             }
         },
