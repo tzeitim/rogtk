@@ -23,40 +23,36 @@ pub enum AssemblyMethod {
     ShortestPath {
         start_anchor: String,
         end_anchor: String,
-    }
+    },
+    ShortestPathAuto,
+
 }
 
 impl AssemblyMethod {
-    /// Parse a method string and optional anchors into an AssemblyMethod
-    pub fn from_str(method: &str, start_anchor: Option<String>, end_anchor: Option<String>) 
-        -> Result<Self, String> {
+    pub fn from_str(method: &str, start_anchor: Option<String>, end_anchor: Option<String>) -> Result<Self, String> {
         match method {
             "compression" => {
-                // For compression method, anchors should not be provided
                 if start_anchor.is_some() || end_anchor.is_some() {
                     return Err("Anchor sequences should not be provided for compression method".to_string());
                 }
                 Ok(AssemblyMethod::Compression)
             },
             "shortest_path" => {
-                // For shortest path, both anchors must be provided
                 match (start_anchor, end_anchor) {
                     (Some(start), Some(end)) => Ok(AssemblyMethod::ShortestPath { 
                         start_anchor: start, 
                         end_anchor: end 
                     }),
-                    (None, None) => {
-                        Err("Both start_anchor and end_anchor are required for shortest_path method".to_string())
-                    },
-                    (None, Some(_)) => {
-                        Err("start_anchor is required for shortest_path method".to_string())
-                    },
-                    (Some(_), None) => {
-                        Err("end_anchor is required for shortest_path method".to_string())
-                    }
+                    _ => Err("Both start_anchor and end_anchor are required for shortest_path method".to_string()),
                 }
             },
-            _ => Err("Invalid assembly method. Must be 'compression' or 'shortest_path'".to_string())
+            "shortest_path_auto" => {
+                if start_anchor.is_some() || end_anchor.is_some() {
+                    return Err("Anchor sequences should not be provided for shortest_path_auto method".to_string());
+                }
+                Ok(AssemblyMethod::ShortestPathAuto)
+            },
+            _ => Err(format!("Unknown assembly method: {}", method)),
         }
     }
 }

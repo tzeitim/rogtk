@@ -256,13 +256,39 @@ fn output_string_type(input_fields: &[Field]) -> PolarsResult<Field> {
 fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsResult<Series> {
     debug!("Received kwargs: {:?}", kwargs);
     
-    let method = AssemblyMethod::from_str(
-        &kwargs.method,
-        kwargs.start_anchor,
-        kwargs.end_anchor,
-    ).map_err(|e| PolarsError::ComputeError(
-        format!("Invalid assembly method: {}", e).into()
-    ))?;
+
+    let method = match kwargs.method.as_str() {
+        "compression" => {
+            if kwargs.start_anchor.is_some() || kwargs.end_anchor.is_some() {
+                return Err(PolarsError::ComputeError(
+                        "Anchor sequences should not be provided for compression method".into()
+                ));
+            }
+            AssemblyMethod::Compression
+        },
+        "shortest_path" => {
+            match (&kwargs.start_anchor, &kwargs.end_anchor) {
+                (Some(start), Some(end)) => AssemblyMethod::ShortestPath {
+                    start_anchor: start.clone(),
+                    end_anchor: end.clone(),
+                },
+                _ => return Err(PolarsError::ComputeError(
+                        "Both start_anchor and end_anchor are required for shortest_path method".into()
+                )),
+            }
+        },
+        "shortest_path_auto" => {
+            if kwargs.start_anchor.is_some() || kwargs.end_anchor.is_some() {
+                return Err(PolarsError::ComputeError(
+                        "Anchor sequences should not be provided for shortest_path_auto method".into()
+                ));
+            }
+            AssemblyMethod::ShortestPathAuto
+        },
+        _ => return Err(PolarsError::ComputeError(
+                "Invalid assembly method. Must be 'compression', 'shortest_path', or 'shortest_path_auto'".into()
+        )),
+    };
     
     // Extract sequences from input series
     let ca = inputs[0].str()?;

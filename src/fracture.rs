@@ -329,7 +329,7 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
 ) -> Result<Vec<String>> {
     let _ = env_logger::try_init();
     let should_export = export_graphs.unwrap_or(true);
-    
+
     // Get initial kmers and stats
     let preliminary_stats = analyze_dbg::<K>(seq_tuples, min_coverage)
         .ok_or_else(|| anyhow::anyhow!("Failed to create graph"))?;
@@ -346,6 +346,7 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
         preliminary_graph.add(&kmer_bytes, *exts, *count);
     }
     let preliminary_graph = preliminary_graph.finish();
+
     match method {
         AssemblyMethod::Compression => {
             // Export uncompressed preliminary graph if enabled
@@ -380,40 +381,64 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
             info!("Assembly complete. Found {} contigs", contigs.len());
             Ok(contigs)
         },
+
         AssemblyMethod::ShortestPath { start_anchor, end_anchor } => {
 
-        if should_export {
-            let prelim_path = format!("{}_preliminary.dot", prefix);
-            export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
-            info!("Exported preliminary graph to {}", prelim_path);
-        }
-
-        info!("Starting path finding assembly with anchors: {} -> {}", start_anchor, end_anchor);
-        
-        match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor) {
-            Ok(result) => {
-                info!("Path finding succeeded - found path of {} nodes", result.path.len());
-
-                if should_export {
-                    // Export path sequences to CSV
-                    let path_path = format!("{}_path.csv", prefix);
-                    let mut path_df = DataFrame::new(vec![
-                        Series::new("sequence".into(), &result.path),
-                        Series::new("coverage".into(), vec![1; result.path.len()]),
-                    ])?;
-                    CsvWriter::new(File::create(path_path)?)
-                        .finish(&mut path_df)?;
-
-                }
-                
-                Ok(vec![result.assembled_sequence])
-            },
-            Err(e) => {
-                debug!("Path finding failed: {}", e);
-                Ok(Vec::new())
+            if should_export {
+                let prelim_path = format!("{}_preliminary.dot", prefix);
+                export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
+                info!("Exported preliminary graph to {}", prelim_path);
             }
-        }
-    }
+
+            info!("Starting path finding assembly with anchors: {} -> {}", start_anchor, end_anchor);
+
+            match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor) {
+                Ok(result) => {
+                    info!("Path finding succeeded - found path of {} nodes", result.path.len());
+
+                    if should_export {
+                        // Export path sequences to CSV
+                        let path_path = format!("{}_path.csv", prefix);
+                        let mut path_df = DataFrame::new(vec![
+                            Series::new("sequence".into(), &result.path),
+                            Series::new("coverage".into(), vec![1; result.path.len()]),
+                        ])?;
+                        CsvWriter::new(File::create(path_path)?)
+                            .finish(&mut path_df)?;
+
+                    }
+
+                    Ok(vec![result.assembled_sequence])
+                },
+                Err(e) => {
+                    debug!("Path finding failed: {}", e);
+                    Ok(Vec::new())
+                }
+
+            }
+        },
+
+        AssemblyMethod::ShortestPathAuto => {
+            // Find all nodes with degree 1 (endpoints)
+            let endpoints: Vec<NodeId> = graph.nodes()
+                .filter(|&node_id| graph.degree(node_id) == 1)
+                .collect();
+
+            match endpoints.len() {
+                2 => {
+                    // Perfect case: exactly 2 endpoints
+                    let start_seq = graph.get_sequence(endpoints[0]);
+                    let end_seq = graph.get_sequence(endpoints[1]);
+                    assemble_with_path_finding(graph, &start_seq, &end_seq)
+                },
+                0 => Err("No endpoints found - circular contig or complex structure".to_string()),
+                1 => Err("Only one endpoint found - incomplete contig".to_string()),
+                _ => {
+                    // Multiple endpoints - choose the pair with highest coverage path
+                    find_best_endpoint_pair(graph, endpoints)
+                }
+            }
+        },
     }
 }
 
