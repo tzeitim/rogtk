@@ -131,10 +131,12 @@ fn find_anchor_nodes(
     
     for node_idx in graph.node_indices() {
         let sequence = &graph[node_idx];
-        if sequence.contains(start_seq) {
+        if sequence.starts_with(start_seq) {
+            debug!("Found start node idx {} {}", node_idx.index(), &graph[node_idx]);
             start_nodes.push(node_idx);
         }
-        if sequence.contains(end_seq) {
+        if sequence.ends_with(end_seq) {
+            debug!("Found end node idx {} {}", node_idx.index(), &graph[node_idx]);
             end_nodes.push(node_idx);
         }
     }
