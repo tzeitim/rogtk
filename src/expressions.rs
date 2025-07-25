@@ -255,30 +255,41 @@ fn output_string_type(input_fields: &[Field]) -> PolarsResult<Field> {
 #[polars_expr(output_type_func=output_string_type)]
 fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsResult<Series> {
     debug!("Received kwargs: {:?}", kwargs);
+    
 
-    // Create AssemblyMethod based on method string
     let method = match kwargs.method.as_str() {
-        "compression" => Ok(AssemblyMethod::Compression),
-        "shortest_path" => AssemblyMethod::from_str(
-            &kwargs.method,
-            kwargs.start_anchor,
-            kwargs.end_anchor,
-        ),
-        _ => Err("Invalid assembly method. Must be 'compression' or 'shortest_path'".to_string())
+        "compression" => {
+            if kwargs.start_anchor.is_some() || kwargs.end_anchor.is_some() {
+                return Err(PolarsError::ComputeError(
+                        "Anchor sequences should not be provided for compression method".into()
+                ));
+            }
+            AssemblyMethod::Compression
+        },
+        "shortest_path" => {
+            match (&kwargs.start_anchor, &kwargs.end_anchor) {
+                (Some(start), Some(end)) => AssemblyMethod::ShortestPath {
+                    start_anchor: start.clone(),
+                    end_anchor: end.clone(),
+                },
+                _ => return Err(PolarsError::ComputeError(
+                        "Both start_anchor and end_anchor are required for shortest_path method".into()
+                )),
+            }
+        },
+        "shortest_path_auto" => {
+            if kwargs.start_anchor.is_some() || kwargs.end_anchor.is_some() {
+                return Err(PolarsError::ComputeError(
+                        "Anchor sequences should not be provided for shortest_path_auto method".into()
+                ));
+            }
+            AssemblyMethod::ShortestPathAuto
+        },
+        _ => return Err(PolarsError::ComputeError(
+                "Invalid assembly method. Must be 'compression', 'shortest_path', or 'shortest_path_auto'".into()
+        )),
     };
-
-    // Handle any errors from method parsing
-    let method = match method {
-        Ok(m) => m,
-        Err(e) => {
-            debug!("Method parsing error: {}", e);
-            return Ok(StringChunked::from_slice(
-                PlSmallStr::from_str("assembled_sequences"),
-                &[""]
-            ).into_series());
-        }
-    };
-
+    
     // Extract sequences from input series
     let ca = inputs[0].str()?;
     
@@ -289,7 +300,7 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
         .collect();
     
     // Call assembly function with only_largest always set to true
-    match assemble_sequences(
+    let contigs = assemble_sequences(
         sequences,
         kwargs.k,
         kwargs.min_coverage,
@@ -299,22 +310,15 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
         kwargs.min_length,
         kwargs.auto_k,
         kwargs.prefix,
-    ) {
-        Ok(contigs) => {
-            let result = contigs.join("\n");
-            Ok(StringChunked::from_slice(
-                    PlSmallStr::from_str("assembled_sequences"),
-                    &[result.as_str()]
-            ).into_series())
-        },
-        Err(e) => {
-            debug!("Assembly failed: {}", e);
-            Ok(StringChunked::from_slice(
-                    PlSmallStr::from_str("assembled_sequences"),
-                    &[""]
-            ).into_series())
-        }
-    }
+    ).map_err(|e| PolarsError::ComputeError(
+        format!("Assembly failed: {}", e).into()
+    ))?;
+
+    let result = contigs.join("\n");
+    Ok(StringChunked::from_slice(
+        PlSmallStr::from_str("assembled_sequences"),
+        &[result.as_str()]
+    ).into_series())
 }
 
 #[derive(Deserialize)]

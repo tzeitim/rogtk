@@ -145,14 +145,13 @@ fn export_dot_from_dataframe(
         let edges = outgoing_nodes.get(idx).unwrap_or("");
         let directions = outgoing_directions.get(idx).unwrap_or("");
         
-        // Write node
         let color = match node_type {
             "isolated" | "terminal" => "#ff110030",
             _ => "#4895fa30"
         };
         
         writeln!(file,
-            "    n{} [label=\"ID: {}\\nSeq: {}\\ncov: {}\" style=filled fillcolor=\"{}\"]",
+            "    n{} [label=\"ID: {}\\nSeq: {}\\ncov: {}\", style=filled, fillcolor=\"{}\"]",
             node_id, node_id, sequence, node_data, color
         )?;
         

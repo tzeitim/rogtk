@@ -329,7 +329,7 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
 ) -> Result<Vec<String>> {
     let _ = env_logger::try_init();
     let should_export = export_graphs.unwrap_or(true);
-    
+
     // Get initial kmers and stats
     let preliminary_stats = analyze_dbg::<K>(seq_tuples, min_coverage)
         .ok_or_else(|| anyhow::anyhow!("Failed to create graph"))?;
@@ -346,6 +346,7 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
         preliminary_graph.add(&kmer_bytes, *exts, *count);
     }
     let preliminary_graph = preliminary_graph.finish();
+
     match method {
         AssemblyMethod::Compression => {
             // Export uncompressed preliminary graph if enabled
@@ -380,40 +381,87 @@ fn assemble_with_k<K: Kmer + Send + Sync + Debug + 'static>(
             info!("Assembly complete. Found {} contigs", contigs.len());
             Ok(contigs)
         },
+
         AssemblyMethod::ShortestPath { start_anchor, end_anchor } => {
 
-        if should_export {
-            let prelim_path = format!("{}_preliminary.dot", prefix);
-            export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
-            info!("Exported preliminary graph to {}", prelim_path);
-        }
-
-        info!("Starting path finding assembly with anchors: {} -> {}", start_anchor, end_anchor);
-        
-        match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor) {
-            Ok(result) => {
-                info!("Path finding succeeded - found path of {} nodes", result.path.len());
-
-                if should_export {
-                    // Export path sequences to CSV
-                    let path_path = format!("{}_path.csv", prefix);
-                    let mut path_df = DataFrame::new(vec![
-                        Series::new("sequence".into(), &result.path),
-                        Series::new("coverage".into(), vec![1; result.path.len()]),
-                    ])?;
-                    CsvWriter::new(File::create(path_path)?)
-                        .finish(&mut path_df)?;
-
-                }
-                
-                Ok(vec![result.assembled_sequence])
-            },
-            Err(e) => {
-                debug!("Path finding failed: {}", e);
-                Ok(Vec::new())
+            if should_export {
+                let prelim_path = format!("{}_preliminary.dot", prefix);
+                export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
+                info!("Exported preliminary graph to {}", prelim_path);
             }
-        }
-    }
+
+            info!("Starting path finding assembly with anchors: {} -> {}", start_anchor, end_anchor);
+
+            match assemble_with_path_finding(&preliminary_graph, &start_anchor, &end_anchor) {
+                Ok(result) => {
+                    info!("Path finding succeeded - found path of {} nodes", result.path.len());
+
+                    if should_export {
+                        // Export path sequences to CSV
+                        let path_path = format!("{}_path.csv", prefix);
+                        let mut path_df = DataFrame::new(vec![
+                            Series::new("sequence".into(), &result.path),
+                            Series::new("coverage".into(), vec![1; result.path.len()]),
+                        ])?;
+                        CsvWriter::new(File::create(path_path)?)
+                            .finish(&mut path_df)?;
+
+                    }
+
+                    Ok(vec![result.assembled_sequence])
+                },
+                Err(e) => {
+                    debug!("Path finding failed: {}", e);
+                    Ok(Vec::new())
+                }
+
+            }
+        },
+// Replace the entire ShortestPathAuto match arm in fracture.rs with this:
+
+        AssemblyMethod::ShortestPathAuto => {
+            // Export preliminary graph if enabled
+            if should_export {
+                let prelim_path = format!("{}_preliminary.dot", prefix);
+                export_graph(&preliminary_graph, &prelim_path, "Preliminary ")?;
+                info!("Exported preliminary graph to {}", prelim_path);
+            }
+
+            info!("Starting automatic path finding assembly");
+
+            match assemble_with_auto_path_finding(&preliminary_graph) {
+                Ok(result) => {
+                    info!("Auto path finding succeeded - found path of {} nodes", result.path.len());
+                    info!("Assembled sequence length: {}", result.assembled_sequence.len());
+
+                    if should_export {
+                        // Export path sequences to CSV - same format as shortest_path
+                        let path_path = format!("{}_path.csv", prefix);
+                        let mut path_df = DataFrame::new(vec![
+                            Series::new("sequence".into(), &result.path),
+                            Series::new("coverage".into(), vec![result.mean_coverage; result.path.len()]),
+                        ])?;
+                        CsvWriter::new(File::create(&path_path)?)
+                            .finish(&mut path_df)?;
+                        info!("Exported path to {}", path_path);
+
+                        // Also export a "final" graph showing just the path for consistency
+                        // This helps visualization tools work seamlessly
+                        let _final_path = format!("{}_final.dot", prefix);
+                        // TODO: Create simplified graph with just the path nodes
+                        info!("Note: Final graph export not yet implemented for auto mode");
+                    }
+
+                    Ok(vec![result.assembled_sequence])
+                },
+                Err(e) => {
+                    error!("Auto path finding failed: {}", e);
+                    // Return empty vector instead of propagating error
+                    // This matches behavior of shortest_path when anchors aren't found
+                    Ok(Vec::new())
+                }
+            }
+        },
     }
 }
 
