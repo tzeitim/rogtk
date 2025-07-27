@@ -2,6 +2,7 @@ use clap::{Command, Arg, ArgMatches};
 
 mod parallel_toy;
 mod parallel_toy_ipc;
+mod parallel_toy_parquet_backup;
 
 fn main() {
     let matches = Command::new("Toy Parallel BAM Converter")
@@ -17,7 +18,7 @@ fn main() {
             .short('f')
             .long("format")
             .value_name("FORMAT")
-            .help("Output format: parquet or ipc")
+            .help("Output format: parquet, ipc, or both (for comparison)")
             .default_value("parquet"))
         .arg(Arg::new("batches")
             .short('b')
@@ -78,8 +79,43 @@ fn main() {
                 include_quality,
             )
         }
+        "both" => {
+            println!("\n=== PERFORMANCE COMPARISON ===");
+            println!("Running both formats for performance comparison...\n");
+            
+            // Run Parquet first
+            let parquet_path = format!("{}.parquet", output_path.trim_end_matches(".parquet").trim_end_matches(".arrow"));
+            println!("1. Testing Parquet format:");
+            let parquet_result = parallel_toy_parquet_backup::parallel_toy_conversion(
+                &parquet_path,
+                num_batches,
+                records_per_batch,
+                num_threads,
+                include_sequence,
+                include_quality,
+            );
+            
+            if let Err(e) = parquet_result {
+                eprintln!("Parquet conversion failed: {}", e);
+                return;
+            }
+            
+            println!("\n" + "=".repeat(50).as_str());
+            
+            // Run IPC second
+            let ipc_path = format!("{}.arrow", output_path.trim_end_matches(".parquet").trim_end_matches(".arrow"));
+            println!("2. Testing Arrow IPC format:");
+            parallel_toy_ipc::parallel_toy_ipc_conversion(
+                &ipc_path,
+                num_batches,
+                records_per_batch,
+                num_threads,
+                include_sequence,
+                include_quality,
+            )
+        }
         _ => {
-            eprintln!("Unsupported format: {}. Use 'parquet' or 'ipc'", format);
+            eprintln!("Unsupported format: {}. Use 'parquet', 'ipc', or 'both'", format);
             std::process::exit(1);
         }
     };
