@@ -11,6 +11,7 @@ use sam::alignment::record::QualityScores;
 use arrow::array::*;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use arrow::ipc::writer::FileWriter as ArrowIpcWriter;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::WriterProperties;
@@ -389,6 +390,140 @@ pub fn bam_to_parquet(
                total_records, parquet_path)
     } else {
         format!("Conversion complete: {} records written to {}", total_records, parquet_path)
+    };
+    eprintln!("{}", completion_msg);
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path, 
+    arrow_ipc_path, 
+    batch_size = 50000,
+    include_sequence = true,
+    include_quality = true,
+    limit = None
+))]
+pub fn bam_to_arrow_ipc(
+    bam_path: &str,
+    arrow_ipc_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    limit: Option<usize>,
+) -> PyResult<()> {
+    let input_path = Path::new(bam_path);
+    let output_path = Path::new(arrow_ipc_path);
+
+    if !input_path.exists() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            format!("BAM file does not exist: {}", bam_path)
+        ));
+    }
+    
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    let effective_batch_size = batch_size.min(1000000);
+    
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to create output directory: {}", e)
+            ))?;
+    }
+
+    let mut file = File::open(input_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file '{}': {}", bam_path, e)))?;
+    
+    let mut bam_reader = bam::io::Reader::new(&mut file);
+    
+    let header = bam_reader.read_header()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to read BAM header: {}", e)))?;
+
+    let schema = create_bam_schema(include_sequence, include_quality);
+    
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file '{}': {}", arrow_ipc_path, e)))?;
+
+    let mut arrow_writer = ArrowIpcWriter::try_new(output_file, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow IPC writer: {}", e)))?;
+
+    let mut reusable_buffers = ReusableBuffers::new(effective_batch_size);
+    
+    let mut batch_count = 0;
+    let mut total_records = 0;
+    let target_records = limit.unwrap_or(usize::MAX);
+
+    loop {
+        if batch_count % 10 == 0 {
+            Python::with_gil(|py| {
+                py.check_signals().map_err(|e| {
+                    eprintln!("Conversion interrupted by user");
+                    e
+                })
+            })?;
+        }
+
+        let remaining_records = target_records.saturating_sub(total_records);
+        if remaining_records == 0 {
+            eprintln!("Reached limit of {} records", target_records);
+            break;
+        }
+
+        let current_batch_size = effective_batch_size.min(remaining_records);
+        
+        let batch = read_bam_batch_enhanced(
+            &mut bam_reader, 
+            &header, 
+            current_batch_size, 
+            include_sequence, 
+            include_quality,
+            &mut reusable_buffers
+        )?;
+        
+        if batch.num_rows() == 0 {
+            break;
+        }
+
+        arrow_writer.write(&batch)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to write batch {}: {}", batch_count, e)))?;
+
+        total_records += batch.num_rows();
+        batch_count += 1;
+        
+        if batch_count % 50 == 0 {
+            let progress_msg = if let Some(limit_val) = limit {
+                format!("Processed {} batches, {} / {} records ({:.1}%) - Batch size: {}", 
+                       batch_count, total_records, limit_val, 
+                       100.0 * total_records as f64 / limit_val as f64,
+                       current_batch_size)
+            } else {
+                format!("Processed {} batches, {} total records - Batch size: {}", 
+                       batch_count, total_records, current_batch_size)
+            };
+            eprintln!("{}", progress_msg);
+            
+            if batch_count % 100 == 0 {
+                Python::with_gil(|py| {
+                    let gc = py.import_bound("gc").unwrap();
+                    let _ = gc.call_method0("collect");
+                });
+            }
+        }
+    }
+
+    arrow_writer.finish()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow IPC writer: {}", e)))?;
+
+    let completion_msg = if limit.is_some() {
+        format!("Conversion complete: {} records (limited from potentially more) written to {}", 
+               total_records, arrow_ipc_path)
+    } else {
+        format!("Conversion complete: {} records written to {}", total_records, arrow_ipc_path)
     };
     eprintln!("{}", completion_msg);
     Ok(())
