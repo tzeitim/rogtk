@@ -16,152 +16,6 @@ use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::WriterProperties;
 
 
-#[pyfunction]
-#[pyo3(signature = (
-    bam_path, 
-    parquet_path, 
-    batch_size = 100000,  // Increased default batch size for better throughput
-    include_sequence = true,
-    include_quality = true,
-    compression = "snappy",
-    limit = None
-))]
-pub fn bam_to_parquet_improved(
-    bam_path: &str,
-    parquet_path: &str,
-    batch_size: usize,
-    include_sequence: bool,
-    include_quality: bool,
-    compression: &str,
-    limit: Option<usize>,
-) -> PyResult<()> {
-    let input_path = Path::new(bam_path);
-    let output_path = Path::new(parquet_path);
-
-    if !input_path.exists() {
-        return Err(PyErr::new::<PyRuntimeError, _>(
-            format!("BAM file does not exist: {}", bam_path)
-        ));
-    }
-    
-    if batch_size == 0 {
-        return Err(PyErr::new::<PyRuntimeError, _>(
-            "batch_size must be greater than 0"
-        ));
-    }
-
-    // Cap batch size to prevent excessive memory usage only for extremely large values
-    let effective_batch_size = batch_size.min(1000000);  // Much higher cap
-    
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
-                format!("Failed to create output directory: {}", e)
-            ))?;
-    }
-
-    let mut file = File::open(input_path)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file '{}': {}", bam_path, e)))?;
-    
-    let mut bam_reader = bam::io::Reader::new(&mut file);
-    
-    let header = bam_reader.read_header()
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to read BAM header: {}", e)))?;
-
-    let schema = create_bam_schema(include_sequence, include_quality);
-    
-    let writer_props = WriterProperties::builder()
-        .set_compression(parse_compression(compression))
-        .set_encoding(Encoding::PLAIN)
-        .build();
-
-    let output_file = File::create(output_path)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file '{}': {}", parquet_path, e)))?;
-
-    let mut parquet_writer = ArrowWriter::try_new(output_file, schema.clone(), Some(writer_props))
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Parquet writer: {}", e)))?;
-
-    // Pre-allocate reusable buffers outside the loop
-    let mut reusable_buffers = ReusableBuffers::new(effective_batch_size);
-    
-    let mut batch_count = 0;
-    let mut total_records = 0;
-    let target_records = limit.unwrap_or(usize::MAX);
-
-    loop {
-        // Check for Python interrupts every 10 batches
-        if batch_count % 10 == 0 {
-            Python::with_gil(|py| {
-                py.check_signals().map_err(|e| {
-                    eprintln!("Conversion interrupted by user");
-                    e
-                })
-            })?;
-        }
-
-        let remaining_records = target_records.saturating_sub(total_records);
-        if remaining_records == 0 {
-            eprintln!("Reached limit of {} records", target_records);
-            break;
-        }
-
-        // Adjust batch size if we're approaching the limit
-        let current_batch_size = effective_batch_size.min(remaining_records);
-        
-        let batch = read_bam_batch_improved(
-            &mut bam_reader, 
-            &header, 
-            current_batch_size, 
-            include_sequence, 
-            include_quality,
-            &mut reusable_buffers  // Pass reusable buffers
-        )?;
-        
-        if batch.num_rows() == 0 {
-            break;
-        }
-
-        parquet_writer.write(&batch)
-            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to write batch {}: {}", batch_count, e)))?;
-
-        total_records += batch.num_rows();
-        batch_count += 1;
-        
-        // More frequent progress updates with memory info
-        if batch_count % 50 == 0 {
-            let progress_msg = if let Some(limit_val) = limit {
-                format!("Processed {} batches, {} / {} records ({:.1}%) - Batch size: {}", 
-                       batch_count, total_records, limit_val, 
-                       100.0 * total_records as f64 / limit_val as f64,
-                       current_batch_size)
-            } else {
-                format!("Processed {} batches, {} total records - Batch size: {}", 
-                       batch_count, total_records, current_batch_size)
-            };
-            eprintln!("{}", progress_msg);
-            
-            // Force garbage collection every 100 batches
-            if batch_count % 100 == 0 {
-                Python::with_gil(|py| {
-                    let gc = py.import_bound("gc").unwrap();
-                    let _ = gc.call_method0("collect");
-                });
-            }
-        }
-    }
-
-    parquet_writer.close()
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Parquet writer: {}", e)))?;
-
-    let completion_msg = if limit.is_some() {
-        format!("Conversion complete: {} records (limited from potentially more) written to {}", 
-               total_records, parquet_path)
-    } else {
-        format!("Conversion complete: {} records written to {}", total_records, parquet_path)
-    };
-    eprintln!("{}", completion_msg);
-    Ok(())
-}
 
 // Struct to hold reusable buffers
 struct ReusableBuffers {
@@ -227,7 +81,7 @@ impl ReusableBuffers {
     }
 }
 
-fn read_bam_batch_improved(
+fn read_bam_batch_enhanced(
     reader: &mut bam::io::Reader<bgzf::Reader<&mut File>>,
     header: &sam::Header,
     batch_size: usize,
@@ -245,7 +99,7 @@ fn read_bam_batch_improved(
         match reader.read_record(&mut record) {
             Ok(0) => break, // EOF
             Ok(_) => {
-                extract_record_data_improved(
+                extract_record_data_enhanced(
                     &record, 
                     header, 
                     buffers,
@@ -299,7 +153,7 @@ fn read_bam_batch_improved(
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create record batch: {}", e)))
 }
 
-fn extract_record_data_improved(
+fn extract_record_data_enhanced(
     record: &bam::Record,
     header: &sam::Header,
     buffers: &mut ReusableBuffers,
@@ -397,7 +251,7 @@ fn extract_record_data_improved(
 #[pyo3(signature = (
     bam_path, 
     parquet_path, 
-    batch_size = 10000,
+    batch_size = 50000,  // Balanced default batch size for optimal memory/performance trade-off
     include_sequence = true,
     include_quality = true,
     compression = "snappy",
@@ -427,6 +281,9 @@ pub fn bam_to_parquet(
         ));
     }
 
+    // Cap batch size to prevent excessive memory usage only for extremely large values
+    let effective_batch_size = batch_size.min(1000000);  // Much higher cap
+    
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| PyErr::new::<PyRuntimeError, _>(
@@ -455,6 +312,9 @@ pub fn bam_to_parquet(
     let mut parquet_writer = ArrowWriter::try_new(output_file, schema.clone(), Some(writer_props))
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Parquet writer: {}", e)))?;
 
+    // Pre-allocate reusable buffers outside the loop
+    let mut reusable_buffers = ReusableBuffers::new(effective_batch_size);
+    
     let mut batch_count = 0;
     let mut total_records = 0;
     let target_records = limit.unwrap_or(usize::MAX);
@@ -477,18 +337,18 @@ pub fn bam_to_parquet(
         }
 
         // Adjust batch size if we're approaching the limit
-        let current_batch_size = batch_size.min(remaining_records);
+        let current_batch_size = effective_batch_size.min(remaining_records);
         
-        let batch = read_bam_batch(
+        let batch = read_bam_batch_enhanced(
             &mut bam_reader, 
             &header, 
             current_batch_size, 
             include_sequence, 
-            include_quality
+            include_quality,
+            &mut reusable_buffers  // Pass reusable buffers
         )?;
         
         if batch.num_rows() == 0 {
-            // no more batches to go; we are done
             break;
         }
 
@@ -498,15 +358,26 @@ pub fn bam_to_parquet(
         total_records += batch.num_rows();
         batch_count += 1;
         
-        if batch_count % 100 == 0 {
+        // More frequent progress updates with memory info
+        if batch_count % 50 == 0 {
             let progress_msg = if let Some(limit_val) = limit {
-                format!("Processed {} batches, {} / {} records ({:.1}%)", 
+                format!("Processed {} batches, {} / {} records ({:.1}%) - Batch size: {}", 
                        batch_count, total_records, limit_val, 
-                       100.0 * total_records as f64 / limit_val as f64)
+                       100.0 * total_records as f64 / limit_val as f64,
+                       current_batch_size)
             } else {
-                format!("Processed {} batches, {} total records", batch_count, total_records)
+                format!("Processed {} batches, {} total records - Batch size: {}", 
+                       batch_count, total_records, current_batch_size)
             };
             eprintln!("{}", progress_msg);
+            
+            // Force garbage collection every 100 batches
+            if batch_count % 100 == 0 {
+                Python::with_gil(|py| {
+                    let gc = py.import_bound("gc").unwrap();
+                    let _ = gc.call_method0("collect");
+                });
+            }
         }
     }
 
@@ -545,149 +416,8 @@ fn create_bam_schema(include_sequence: bool, include_quality: bool) -> Arc<Schem
 }
 
 
-fn read_bam_batch(
-    reader: &mut bam::io::Reader<bgzf::Reader<&mut File>>,
-    header: &sam::Header,
-    batch_size: usize,
-    include_sequence: bool,
-    include_quality: bool,
-) -> PyResult<RecordBatch> {
-    let mut names = Vec::with_capacity(batch_size);
-    let mut chroms = Vec::with_capacity(batch_size);
-    let mut starts = Vec::with_capacity(batch_size);
-    let mut ends = Vec::with_capacity(batch_size);
-    let mut flags = Vec::with_capacity(batch_size);
-    
-    let mut sequences = if include_sequence { 
-        Some(Vec::with_capacity(batch_size)) 
-    } else { 
-        None 
-    };
-    let mut quality_scores = if include_quality { 
-        Some(Vec::with_capacity(batch_size)) 
-    } else { 
-        None 
-    };
-
-    let mut count = 0;
-    let mut record = bam::Record::default();
-
-    while count < batch_size {
-        match reader.read_record(&mut record) {
-            Ok(0) => break, // EOF - no more records
-            Ok(_) => {
-                extract_record_data(
-                    &record, 
-                    header, 
-                    &mut names, 
-                    &mut chroms, 
-                    &mut starts, 
-                    &mut ends, 
-                    &mut flags,
-                    &mut sequences,
-                    &mut quality_scores
-                )?;
-                count += 1;
-            }
-            Err(e) => {
-                return Err(PyErr::new::<PyRuntimeError, _>(
-                    format!("Error reading BAM record {}: {}", count, e)
-                ));
-            }
-        }
-    }
-
-    create_record_batch(names, chroms, starts, ends, flags, sequences, quality_scores, include_sequence, include_quality)
-}
 
 
-fn extract_record_data(
-    record: &bam::Record,
-    header: &sam::Header,
-    names: &mut Vec<String>,
-    chroms: &mut Vec<Option<String>>,
-    starts: &mut Vec<Option<u32>>,
-    ends: &mut Vec<Option<u32>>,
-    flags: &mut Vec<u32>,
-    sequences: &mut Option<Vec<Option<String>>>,
-    quality_scores: &mut Option<Vec<Option<String>>>,
-) -> PyResult<()> {
-    // 1. Extract read name
-    let name = record.name()
-        .map(|bstr| bstr.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    names.push(name);
-
-    // 2. Extract chromosome/reference name
-    let chrom = if let Some(reference_sequence_id) = record.reference_sequence_id() {
-        // reference_sequence_id is a Result, so we need to handle it
-        match reference_sequence_id {
-            Ok(id) => {
-                header.reference_sequences()
-                    .get_index(id)
-                    .map(|(name, _)| name.to_string())
-            }
-            Err(_) => None // Invalid reference ID
-        }
-    } else {
-        None // Unmapped read
-    };
-    chroms.push(chrom);
-
-    // 3. Extract coordinates (convert to 1-based to match polars-bio)
-    let (start_pos, end_pos) = if let Some(alignment_start) = record.alignment_start() {
-        match alignment_start {
-            Ok(pos) => {
-                let start_1based = pos.get() as u32; // noodles Position.get() returns usize
-                let end_1based = start_1based + calculate_bam_alignment_length(&record.cigar()) - 1;
-                (Some(start_1based), Some(end_1based))
-            }
-            Err(_) => (None, None) // Invalid position
-        }
-    } else {
-        (None, None) // Unmapped read
-    };
-    starts.push(start_pos);
-    ends.push(end_pos);
-
-    // 4. Extract flags
-    flags.push(record.flags().bits() as u32); // Convert u16 to u32
-
-    // 5. Extract sequence if requested
-    if let Some(ref mut seq_vec) = sequences {
-        // Get the sequence object and keep it alive
-        let sequence_obj = record.sequence();
-        let seq_len = sequence_obj.len();
-        let sequence_bytes = sequence_obj.as_ref();
-        let mut sequence = String::with_capacity(seq_len);
-        
-        // Each byte contains 2 bases (4 bits each)
-        for i in 0..seq_len {
-            let byte_idx = i / 2;
-            let base_encoded = if i % 2 == 0 {
-                // Even index: higher 4 bits
-                (sequence_bytes[byte_idx] >> 4) & 0x0F
-            } else {
-                // Odd index: lower 4 bits
-                sequence_bytes[byte_idx] & 0x0F
-            };
-            sequence.push(decode_base(base_encoded));
-        }
-        
-        seq_vec.push(if sequence.is_empty() { None } else { Some(sequence) });
-    }
-
-    // 6. Extract quality scores if requested  
-    if let Some(ref mut qual_vec) = quality_scores {
-        let quality = record.quality_scores()
-            .iter()
-            .map(|q| char::from(q + b'!')) // Convert to ASCII PHRED+33
-            .collect::<String>();
-        qual_vec.push(if quality.is_empty() { None } else { Some(quality) });
-    }
-
-    Ok(())
-}
 
 fn decode_base(encoded: u8) -> char {
     match encoded {
@@ -720,42 +450,6 @@ fn calculate_bam_alignment_length(cigar: &bam::record::Cigar) -> u32 {
     length
 }
 
-fn create_record_batch(
-    names: Vec<String>,
-    chroms: Vec<Option<String>>,
-    starts: Vec<Option<u32>>,
-    ends: Vec<Option<u32>>,
-    flags: Vec<u32>,
-    sequences: Option<Vec<Option<String>>>,
-    quality_scores: Option<Vec<Option<String>>>,
-    include_sequence: bool,
-    include_quality: bool,
-) -> PyResult<RecordBatch> {
-    // Create Arrow arrays from our data
-    let mut arrays: Vec<Arc<dyn Array>> = vec![
-        Arc::new(StringArray::from(names)),
-        Arc::new(StringArray::from(chroms)),
-        Arc::new(UInt32Array::from(starts)),
-        Arc::new(UInt32Array::from(ends)),
-        Arc::new(UInt32Array::from(flags)),
-    ];
-
-    if include_sequence {
-        if let Some(seq_vec) = sequences {
-            arrays.push(Arc::new(StringArray::from(seq_vec)));
-        }
-    }
-
-    if include_quality {
-        if let Some(qual_vec) = quality_scores {
-            arrays.push(Arc::new(StringArray::from(qual_vec)));
-        }
-    }
-
-    let schema = create_bam_schema(include_sequence, include_quality);
-    RecordBatch::try_new(schema, arrays)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create record batch: {}", e)))
-}
 
 
 // TODO: Add these columns later if needed:
