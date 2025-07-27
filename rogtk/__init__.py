@@ -356,6 +356,24 @@ class UmiNamespace:
             args=self._expr,
             is_elementwise=True,
         )
+    
+    def longest_homopolymer_run(self) -> pl.Expr:
+        """Calculate longest homopolymer run length in UMI sequence."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="umi_longest_homopolymer_expr",
+            args=self._expr,
+            is_elementwise=True,
+        )
+    
+    def dust_score(self) -> pl.Expr:
+        """Calculate DUST score (low-complexity measure) for UMI sequence."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="umi_dust_score_expr",
+            args=self._expr,
+            is_elementwise=True,
+        )
 
 def umi_complexity_scores(expr: IntoExpr) -> pl.Expr:
     """
@@ -366,6 +384,8 @@ def umi_complexity_scores(expr: IntoExpr) -> pl.Expr:
     - linguistic_complexity: Ratio of unique k-mers to total possible k-mers  
     - homopolymer_fraction: Fraction of sequence in homopolymer runs (3+ bases)
     - dinucleotide_entropy: Entropy of dinucleotide frequencies
+    - longest_homopolymer_run: Length of longest homopolymer run
+    - dust_score: DUST score for low-complexity detection
     - combined_score: Weighted combination of all metrics
     
     Parameters

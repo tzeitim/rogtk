@@ -7,33 +7,37 @@ pub struct ComplexityScore {
     pub linguistic_complexity: f64,
     pub homopolymer_fraction: f64,
     pub dinucleotide_entropy: f64,
+    pub longest_homopolymer_run: usize,
+    pub dust_score: f64,
     pub combined_score: f64,
 }
 
 
-impl ComplexityScore {
-    pub fn is_low_complexity(&self, threshold: f64) -> bool {
-        self.combined_score < threshold
-    }
-}
 
 pub fn calculate_umi_complexity(umi: &str) -> ComplexityScore {
     let shannon = shannon_entropy(umi);
     let linguistic = linguistic_complexity(umi);
     let homopolymer = homopolymer_fraction(umi);
     let dinuc = dinucleotide_entropy(umi);
+    let longest_homo = longest_homopolymer_run(umi);
+    let dust = dust_score(umi, 64); // Default window size of 64
     
     // Combine metrics (weights can be adjusted)
-    let combined = 0.3 * shannon 
-                 + 0.3 * linguistic 
-                 + 0.2 * (1.0 - homopolymer)  // Invert so higher is better
-                 + 0.2 * dinuc;
+    // Include new metrics in combined score with appropriate weights
+    let combined = 0.25 * shannon 
+                 + 0.25 * linguistic 
+                 + 0.15 * (1.0 - homopolymer)  // Invert so higher is better
+                 + 0.15 * dinuc
+                 + 0.10 * (1.0 - (longest_homo as f64 / umi.len() as f64)) // Invert normalized homopolymer run
+                 + 0.10 * (1.0 - dust.min(1.0)); // Invert and cap dust score
     
     ComplexityScore {
         shannon_entropy: shannon,
         linguistic_complexity: linguistic,
         homopolymer_fraction: homopolymer,
         dinucleotide_entropy: dinuc,
+        longest_homopolymer_run: longest_homo,
+        dust_score: dust,
         combined_score: combined,
     }
 }

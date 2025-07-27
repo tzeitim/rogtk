@@ -1,6 +1,6 @@
 [package]
 name = "rogtk"
-version = "0.1.14-dev2"
+version = "0.1.14"
 authors = [
   "Pedro Olivares Chauvet <pedro.olivares@mdc-berlin.de>", 
   "Pedro Olivares Chauvet <pedro.olivares@weizmann.ac.il>", 
