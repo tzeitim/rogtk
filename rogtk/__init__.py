@@ -293,3 +293,99 @@ class FuzzyExpr:
             },
             is_elementwise=True,
         )
+
+@pl.api.register_expr_namespace("umi")
+class UmiNamespace:
+    def __init__(self, expr: pl.Expr):
+        self._expr = expr
+    
+    def complexity_all(self) -> pl.Expr:
+        """Calculate all UMI complexity scores and return as struct."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="umi_complexity_all_expr",
+            args=self._expr,
+            is_elementwise=True,
+        )
+    
+    def all_scores(self) -> pl.Expr:
+        """Calculate all UMI complexity scores and return as struct (alias for complexity_all)."""
+        return self.complexity_all()
+    
+    def shannon_entropy(self) -> pl.Expr:
+        """Calculate Shannon entropy of UMI sequence."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="umi_shannon_entropy_expr",
+            args=self._expr,
+            is_elementwise=True,
+        )
+    
+    def linguistic_complexity(self) -> pl.Expr:
+        """Calculate linguistic complexity (unique k-mers ratio) of UMI sequence."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="umi_linguistic_complexity_expr",
+            args=self._expr,
+            is_elementwise=True,
+        )
+    
+    def homopolymer_fraction(self) -> pl.Expr:
+        """Calculate fraction of UMI sequence in homopolymer runs (3+ identical bases)."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="umi_homopolymer_fraction_expr",
+            args=self._expr,
+            is_elementwise=True,
+        )
+    
+    def dinucleotide_entropy(self) -> pl.Expr:
+        """Calculate dinucleotide entropy of UMI sequence."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="umi_dinucleotide_entropy_expr",
+            args=self._expr,
+            is_elementwise=True,
+        )
+    
+    def combined_score(self) -> pl.Expr:
+        """Calculate combined complexity score of UMI sequence."""
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="umi_combined_score_expr",
+            args=self._expr,
+            is_elementwise=True,
+        )
+
+def umi_complexity_scores(expr: IntoExpr) -> pl.Expr:
+    """
+    Calculate all UMI complexity scores and return them as separate columns.
+    
+    This function returns a struct containing:
+    - shannon_entropy: Shannon entropy of nucleotide frequencies
+    - linguistic_complexity: Ratio of unique k-mers to total possible k-mers  
+    - homopolymer_fraction: Fraction of sequence in homopolymer runs (3+ bases)
+    - dinucleotide_entropy: Entropy of dinucleotide frequencies
+    - combined_score: Weighted combination of all metrics
+    
+    Parameters
+    ----------
+    expr : IntoExpr
+        Input expression containing UMI sequences
+        
+    Returns
+    -------
+    pl.Expr
+        Struct expression with all complexity scores
+        
+    Examples
+    --------
+    >>> df.with_columns(umi_complexity_scores(pl.col("umi")))
+    >>> df.unnest("umi_complexity")  # To expand struct into separate columns
+    """
+    return register_plugin_function(
+        plugin_path=Path(__file__).parent,
+        function_name="umi_complexity_all_expr",
+        args=expr,
+        is_elementwise=True,
+    )
