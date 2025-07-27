@@ -100,7 +100,7 @@ fn main() {
                 return;
             }
             
-            println!("\n" + "=".repeat(50).as_str());
+            println!("\n{}", "=".repeat(50));
             
             // Run IPC second
             let ipc_path = format!("{}.arrow", output_path.trim_end_matches(".parquet").trim_end_matches(".arrow"));
