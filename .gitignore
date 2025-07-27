@@ -16,3 +16,4 @@ Cargo.lock
 *__*.csv
 .tmp*.dot
 .tmp*.csv
+MANIFEST.in
