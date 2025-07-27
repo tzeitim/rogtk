@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::fracture::assemble_sequences;
 use crate::djfind::AssemblyMethod;
+use crate::umi_score::calculate_umi_complexity;
 
 use log::debug;
 
@@ -685,5 +686,153 @@ fn fuzzy_replace_native_expr(inputs: &[Series], kwargs: FuzzyReplaceNativeKwargs
         output.push_str(&result);
     });
 
+    Ok(out.into_series())
+}
+
+// UMI Complexity Scoring Functions
+fn umi_complexity_struct_output_type(input_fields: &[Field]) -> PolarsResult<Field> {
+    let fields = vec![
+        Field::new("shannon_entropy".into(), DataType::Float64),
+        Field::new("linguistic_complexity".into(), DataType::Float64),
+        Field::new("homopolymer_fraction".into(), DataType::Float64),
+        Field::new("dinucleotide_entropy".into(), DataType::Float64),
+        Field::new("combined_score".into(), DataType::Float64),
+    ];
+    let struct_type = DataType::Struct(fields);
+    let field = Field::new(input_fields[0].name().clone(), struct_type);
+    Ok(field)
+}
+
+#[polars_expr(output_type_func=umi_complexity_struct_output_type)]
+fn umi_complexity_all_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    
+    let mut shannon_values = Vec::new();
+    let mut linguistic_values = Vec::new();
+    let mut homopolymer_values = Vec::new();
+    let mut dinucleotide_values = Vec::new();
+    let mut combined_values = Vec::new();
+    
+    for umi_opt in ca.iter() {
+        match umi_opt {
+            Some(umi) => {
+                let scores = calculate_umi_complexity(umi);
+                shannon_values.push(Some(scores.shannon_entropy));
+                linguistic_values.push(Some(scores.linguistic_complexity));
+                homopolymer_values.push(Some(scores.homopolymer_fraction));
+                dinucleotide_values.push(Some(scores.dinucleotide_entropy));
+                combined_values.push(Some(scores.combined_score));
+            }
+            None => {
+                shannon_values.push(None);
+                linguistic_values.push(None);
+                homopolymer_values.push(None);
+                dinucleotide_values.push(None);
+                combined_values.push(None);
+            }
+        }
+    }
+    
+    // Create series for each field
+    let shannon_series = Series::new("shannon_entropy".into(), shannon_values);
+    let linguistic_series = Series::new("linguistic_complexity".into(), linguistic_values);
+    let homopolymer_series = Series::new("homopolymer_fraction".into(), homopolymer_values);
+    let dinucleotide_series = Series::new("dinucleotide_entropy".into(), dinucleotide_values);
+    let combined_series = Series::new("combined_score".into(), combined_values);
+    
+    // Create struct from series
+    let fields = vec![shannon_series, linguistic_series, homopolymer_series, dinucleotide_series, combined_series];
+    let df = DataFrame::new(fields)?;
+    
+    Ok(df.into_struct(inputs[0].name().clone()).into())
+}
+
+#[polars_expr(output_type=Float64)]
+fn umi_shannon_entropy_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    
+    let results: Vec<Option<f64>> = ca.iter().map(|umi_opt| {
+        match umi_opt {
+            Some(umi) => {
+                let scores = calculate_umi_complexity(umi);
+                Some(scores.shannon_entropy)
+            }
+            None => None,
+        }
+    }).collect();
+    
+    let out = Float64Chunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+#[polars_expr(output_type=Float64)]
+fn umi_linguistic_complexity_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    
+    let results: Vec<Option<f64>> = ca.iter().map(|umi_opt| {
+        match umi_opt {
+            Some(umi) => {
+                let scores = calculate_umi_complexity(umi);
+                Some(scores.linguistic_complexity)
+            }
+            None => None,
+        }
+    }).collect();
+    
+    let out = Float64Chunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+#[polars_expr(output_type=Float64)]
+fn umi_homopolymer_fraction_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    
+    let results: Vec<Option<f64>> = ca.iter().map(|umi_opt| {
+        match umi_opt {
+            Some(umi) => {
+                let scores = calculate_umi_complexity(umi);
+                Some(scores.homopolymer_fraction)
+            }
+            None => None,
+        }
+    }).collect();
+    
+    let out = Float64Chunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+#[polars_expr(output_type=Float64)]
+fn umi_dinucleotide_entropy_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    
+    let results: Vec<Option<f64>> = ca.iter().map(|umi_opt| {
+        match umi_opt {
+            Some(umi) => {
+                let scores = calculate_umi_complexity(umi);
+                Some(scores.dinucleotide_entropy)
+            }
+            None => None,
+        }
+    }).collect();
+    
+    let out = Float64Chunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+#[polars_expr(output_type=Float64)]
+fn umi_combined_score_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    
+    let results: Vec<Option<f64>> = ca.iter().map(|umi_opt| {
+        match umi_opt {
+            Some(umi) => {
+                let scores = calculate_umi_complexity(umi);
+                Some(scores.combined_score)
+            }
+            None => None,
+        }
+    }).collect();
+    
+    let out = Float64Chunked::from_iter_options(ca.name().clone(), results.into_iter());
     Ok(out.into_series())
 }

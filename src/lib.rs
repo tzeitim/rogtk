@@ -22,6 +22,7 @@ mod graph_viz;
 mod fracture_opt;
 mod djfind;
 mod bam;
+mod umi_score;
 
 use crate::single_fastq::{fastq_to_parquet};
 use crate::fracture::{fracture_fasta, fracture_sequences};
