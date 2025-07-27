@@ -46,6 +46,7 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref, '-rc') || contains(github.ref, '.') && !contains(github.ref, '-'))
     strategy:
       matrix:
         target: [x64]
