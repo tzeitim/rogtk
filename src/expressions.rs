@@ -696,6 +696,8 @@ fn umi_complexity_struct_output_type(input_fields: &[Field]) -> PolarsResult<Fie
         Field::new("linguistic_complexity".into(), DataType::Float64),
         Field::new("homopolymer_fraction".into(), DataType::Float64),
         Field::new("dinucleotide_entropy".into(), DataType::Float64),
+        Field::new("longest_homopolymer_run".into(), DataType::UInt32),
+        Field::new("dust_score".into(), DataType::Float64),
         Field::new("combined_score".into(), DataType::Float64),
     ];
     let struct_type = DataType::Struct(fields);
@@ -711,6 +713,8 @@ fn umi_complexity_all_expr(inputs: &[Series]) -> PolarsResult<Series> {
     let mut linguistic_values = Vec::new();
     let mut homopolymer_values = Vec::new();
     let mut dinucleotide_values = Vec::new();
+    let mut longest_homo_values = Vec::new();
+    let mut dust_values = Vec::new();
     let mut combined_values = Vec::new();
     
     for umi_opt in ca.iter() {
@@ -721,6 +725,8 @@ fn umi_complexity_all_expr(inputs: &[Series]) -> PolarsResult<Series> {
                 linguistic_values.push(Some(scores.linguistic_complexity));
                 homopolymer_values.push(Some(scores.homopolymer_fraction));
                 dinucleotide_values.push(Some(scores.dinucleotide_entropy));
+                longest_homo_values.push(Some(scores.longest_homopolymer_run as u32));
+                dust_values.push(Some(scores.dust_score));
                 combined_values.push(Some(scores.combined_score));
             }
             None => {
@@ -728,6 +734,8 @@ fn umi_complexity_all_expr(inputs: &[Series]) -> PolarsResult<Series> {
                 linguistic_values.push(None);
                 homopolymer_values.push(None);
                 dinucleotide_values.push(None);
+                longest_homo_values.push(None);
+                dust_values.push(None);
                 combined_values.push(None);
             }
         }
@@ -738,10 +746,12 @@ fn umi_complexity_all_expr(inputs: &[Series]) -> PolarsResult<Series> {
     let linguistic_series = Series::new("linguistic_complexity".into(), linguistic_values);
     let homopolymer_series = Series::new("homopolymer_fraction".into(), homopolymer_values);
     let dinucleotide_series = Series::new("dinucleotide_entropy".into(), dinucleotide_values);
+    let longest_homo_series = Series::new("longest_homopolymer_run".into(), longest_homo_values);
+    let dust_series = Series::new("dust_score".into(), dust_values);
     let combined_series = Series::new("combined_score".into(), combined_values);
     
     // Create struct from series
-    let fields = vec![shannon_series, linguistic_series, homopolymer_series, dinucleotide_series, combined_series];
+    let fields = vec![shannon_series, linguistic_series, homopolymer_series, dinucleotide_series, longest_homo_series, dust_series, combined_series];
     let df = DataFrame::new(fields)?;
     
     Ok(df.into_struct(inputs[0].name().clone()).into())
@@ -828,6 +838,42 @@ fn umi_combined_score_expr(inputs: &[Series]) -> PolarsResult<Series> {
             Some(umi) => {
                 let scores = calculate_umi_complexity(umi);
                 Some(scores.combined_score)
+            }
+            None => None,
+        }
+    }).collect();
+    
+    let out = Float64Chunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+#[polars_expr(output_type=UInt32)]
+fn umi_longest_homopolymer_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    
+    let results: Vec<Option<u32>> = ca.iter().map(|umi_opt| {
+        match umi_opt {
+            Some(umi) => {
+                let scores = calculate_umi_complexity(umi);
+                Some(scores.longest_homopolymer_run as u32)
+            }
+            None => None,
+        }
+    }).collect();
+    
+    let out = UInt32Chunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+#[polars_expr(output_type=Float64)]
+fn umi_dust_score_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    
+    let results: Vec<Option<f64>> = ca.iter().map(|umi_opt| {
+        match umi_opt {
+            Some(umi) => {
+                let scores = calculate_umi_complexity(umi);
+                Some(scores.dust_score)
             }
             None => None,
         }
