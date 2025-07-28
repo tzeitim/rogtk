@@ -33,17 +33,6 @@ jobs:
           python-version: '3.10'
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
-      - name: AAAAAsign LIBCLANG_PATH
-        run: |
-          LIBCLANG_DIR=$(find /usr/lib -name "libclang.so" -exec dirname {} \;)
-          if [ -z "$LIBCLANG_DIR" ]; then
-            echo "Error: libclang.so not found."
-            exit 1
-          else
-            echo "LIBCLANG_PATH=$LIBCLANG_DIR" >> $GITHUB_ENV
-          fi
-      - name: verify
-        run: echo $LIBCLANG_PATH
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -51,6 +40,8 @@ jobs:
           args: --release --out dist --find-interpreter --features htslib
           sccache: 'true'
           manylinux: auto
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
