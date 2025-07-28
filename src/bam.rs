@@ -543,6 +543,7 @@ pub fn bam_to_arrow_ipc(
     include_sequence = true,
     include_quality = true,
     num_threads = 4,
+    preserve_order = false,
     limit = None
 ))]
 pub fn bam_to_arrow_ipc_parallel(
@@ -552,6 +553,7 @@ pub fn bam_to_arrow_ipc_parallel(
     include_sequence: bool,
     include_quality: bool,
     num_threads: usize,
+    preserve_order: bool,
     limit: Option<usize>,
 ) -> PyResult<()> {
     let start_time = Instant::now();
@@ -597,6 +599,7 @@ pub fn bam_to_arrow_ipc_parallel(
     eprintln!("  Output: {}", arrow_ipc_path);
     eprintln!("  Batch size: {}", effective_batch_size);
     eprintln!("  Threads: {}", effective_threads);
+    eprintln!("  Preserve order: {}", preserve_order);
     eprintln!("  Include sequence: {}", include_sequence);
     eprintln!("  Include quality: {}", include_quality);
 
@@ -668,42 +671,65 @@ pub fn bam_to_arrow_ipc_parallel(
         });
     });
 
-    // Writer thread that collects results in order
+    // Writer thread with conditional ordering
     let writer_handle = std::thread::spawn(move || -> PyResult<usize> {
-        let mut received_batches: std::collections::HashMap<usize, RecordBatch> = std::collections::HashMap::new();
-        let mut next_batch_id = 0;
         let mut total_records = 0;
         
-        while let Ok((batch_id, batch)) = result_receiver.recv() {
-            received_batches.insert(batch_id, batch);
+        if preserve_order {
+            // Order preservation: Complex writer thread with HashMap buffering
+            let mut received_batches: std::collections::HashMap<usize, RecordBatch> = std::collections::HashMap::new();
+            let mut next_batch_id = 0;
             
-            // Write batches in order
-            while let Some(batch) = received_batches.remove(&next_batch_id) {
-                arrow_writer.write(&batch)
-                    .map_err(|e| PyErr::new::<PyRuntimeError, _>(
-                        format!("Failed to write batch {}: {}", next_batch_id, e)
-                    ))?;
+            // Must wait for sequential batches
+            while let Ok((batch_id, batch)) = result_receiver.recv() {
+                received_batches.insert(batch_id, batch);
                 
-                total_records += batch.num_rows();
-                next_batch_id += 1;
-                
-                // Reduce frequency: report every 200 batches instead of 50
-                if next_batch_id % 200 == 0 {
-                    eprintln!("Progress: {} batches written, {} total records", next_batch_id, total_records);
+                // Write batches in order
+                while let Some(batch) = received_batches.remove(&next_batch_id) {
+                    arrow_writer.write(&batch)
+                        .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                            format!("Failed to write batch {}: {}", next_batch_id, e)
+                        ))?;
+                    
+                    total_records += batch.num_rows();
+                    next_batch_id += 1;
+                    
+                    // Reduce frequency: report every 200 batches instead of 50
+                    if next_batch_id % 200 == 0 {
+                        eprintln!("Progress: {} batches written, {} total records", next_batch_id, total_records);
+                    }
                 }
             }
-        }
-        
-        // Write any remaining batches
-        for batch_id in next_batch_id.. {
-            if let Some(batch) = received_batches.remove(&batch_id) {
+            
+            // Write any remaining batches
+            for batch_id in next_batch_id.. {
+                if let Some(batch) = received_batches.remove(&batch_id) {
+                    arrow_writer.write(&batch)
+                        .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                            format!("Failed to write final batch {}: {}", batch_id, e)
+                        ))?;
+                    total_records += batch.num_rows();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            // No order preservation: Direct write as batches arrive - no buffering needed!
+            let mut batch_count = 0;
+            
+            while let Ok((_, batch)) = result_receiver.recv() {
                 arrow_writer.write(&batch)
                     .map_err(|e| PyErr::new::<PyRuntimeError, _>(
-                        format!("Failed to write final batch {}: {}", batch_id, e)
+                        format!("Failed to write batch: {}", e)
                     ))?;
+                
                 total_records += batch.num_rows();
-            } else {
-                break;
+                batch_count += 1;
+                
+                // Reduce frequency: report every 200 batches instead of 50
+                if batch_count % 200 == 0 {
+                    eprintln!("Progress: {} batches written, {} total records", batch_count, total_records);
+                }
             }
         }
         
