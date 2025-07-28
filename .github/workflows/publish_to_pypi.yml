@@ -32,9 +32,16 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - name: AAAAAsign LIBCLANG_PATH
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev
+          LIBCLANG_DIR=$(find /usr/lib -name "libclang.so" -exec dirname {} \;)
+          if [ -z "$LIBCLANG_DIR" ]; then
+            echo "Error: libclang.so not found."
+            exit 1
+          else
+            echo "LIBCLANG_PATH=$LIBCLANG_DIR" >> $GITHUB_ENV
+          fi
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
