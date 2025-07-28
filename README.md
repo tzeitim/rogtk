@@ -1,12 +1,20 @@
 rust ogtk
 
-Installation
-```
+## Installation
+
+**Standard installation:**
+```bash
 pip install -e src/rogtk/
+# or
+maturin develop
+```
 
-#or
-
-maturing develop
+**With HTSlib support (for parallel BAM processing):**
+```bash
+# Requires libclang
+mamba install libclang
+# Build with HTSlib feature
+LIBCLANG_PATH=$CONDA_PREFIX/lib maturin develop --features htslib --release
 ```
 
 
