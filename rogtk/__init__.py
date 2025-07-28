@@ -17,6 +17,7 @@ from rogtk.rogtk import (
     bam_to_parquet,
     bam_to_arrow_ipc,
     bam_to_arrow_ipc_parallel,
+    bam_to_arrow_ipc_gzp_parallel,
 )
 
 @pl.api.register_expr_namespace("dna")
