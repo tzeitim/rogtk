@@ -39,6 +39,7 @@ noodles = { version = "0.82", features = ["bam", "sam", "bgzf"] }
 regex = "1.11.1"
 rayon = "1.10.0"
 crossbeam-channel = "0.5.15"
+gzp = "0.11.3"
 
 #DBGraphs
 bio = "2.0.3"
