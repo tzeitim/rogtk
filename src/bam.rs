@@ -4,6 +4,9 @@ use pyo3::Python;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
+use rayon::ThreadPoolBuilder;
+use crossbeam_channel::{bounded, Receiver, Sender};
 
 use noodles::{bam, sam, bgzf};
 use sam::alignment::record::cigar::op::Kind as CigarOpKind;
@@ -527,6 +530,325 @@ pub fn bam_to_arrow_ipc(
     };
     eprintln!("{}", completion_msg);
     Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path, 
+    arrow_ipc_path, 
+    batch_size = 50000,
+    include_sequence = true,
+    include_quality = true,
+    num_threads = 4,
+    limit = None
+))]
+pub fn bam_to_arrow_ipc_parallel(
+    bam_path: &str,
+    arrow_ipc_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    num_threads: usize,
+    limit: Option<usize>,
+) -> PyResult<()> {
+    let start_time = Instant::now();
+    
+    // Thread validation with nice user messages
+    let effective_threads = if num_threads == 0 {
+        eprintln!("Warning: num_threads cannot be 0, using default of 4 threads");
+        4
+    } else if num_threads > 8 {
+        eprintln!("Notice: For optimal performance, we recommend using 8 threads or fewer based on our benchmarking.");
+        eprintln!("Your request for {} threads has been capped to 8 threads for best results.", num_threads);
+        8
+    } else {
+        num_threads
+    };
+    
+    let input_path = Path::new(bam_path);
+    let output_path = Path::new(arrow_ipc_path);
+
+    if !input_path.exists() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            format!("BAM file does not exist: {}", bam_path)
+        ));
+    }
+    
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    let effective_batch_size = batch_size.min(1000000);
+    
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to create output directory: {}", e)
+            ))?;
+    }
+
+    eprintln!("Starting parallel BAM to IPC conversion:");
+    eprintln!("  Input: {}", bam_path);
+    eprintln!("  Output: {}", arrow_ipc_path);
+    eprintln!("  Batch size: {}", effective_batch_size);
+    eprintln!("  Threads: {}", effective_threads);
+    eprintln!("  Include sequence: {}", include_sequence);
+    eprintln!("  Include quality: {}", include_quality);
+
+    let mut file = File::open(input_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file '{}': {}", bam_path, e)))?;
+    
+    let mut bam_reader = bam::io::Reader::new(&mut file);
+    
+    let header = bam_reader.read_header()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to read BAM header: {}", e)))?;
+
+    let schema = create_bam_schema(include_sequence, include_quality);
+    
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file '{}': {}", arrow_ipc_path, e)))?;
+
+    let mut arrow_writer = ArrowIpcWriter::try_new(output_file, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow IPC writer: {}", e)))?;
+
+    // Setup parallel processing architecture
+    let channel_size = (effective_threads * 4).max(16);
+    let (batch_sender, batch_receiver): (Sender<(usize, Vec<bam::Record>)>, Receiver<(usize, Vec<bam::Record>)>) = bounded(channel_size);
+    let (result_sender, result_receiver): (Sender<(usize, RecordBatch)>, Receiver<(usize, RecordBatch)>) = bounded(channel_size);
+    
+    let header_arc = Arc::new(header.clone());
+    
+    // Configure thread pool
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(effective_threads)
+        .build()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create thread pool: {}", e)))?;
+
+    // Spawn processing workers
+    let workers_header = header_arc.clone();
+    let workers_result_sender = result_sender.clone();
+    let workers_batch_receiver = batch_receiver.clone();
+    
+    let _workers_handle = std::thread::spawn(move || {
+        pool.install(|| {
+            while let Ok((batch_id, raw_records)) = workers_batch_receiver.recv() {
+                let batch_start = Instant::now();
+                
+                // Process raw BAM records into Arrow RecordBatch
+                let batch_result = process_bam_records_to_batch(
+                    &raw_records,
+                    &workers_header,
+                    include_sequence,
+                    include_quality,
+                    batch_id,
+                );
+                
+                match batch_result {
+                    Ok(batch) => {
+                        let batch_duration = batch_start.elapsed();
+                        eprintln!("Thread processed batch {} ({} records) in {:?}", 
+                                batch_id, batch.num_rows(), batch_duration);
+                        
+                        if let Err(_) = workers_result_sender.send((batch_id, batch)) {
+                            eprintln!("Failed to send processed batch {}", batch_id);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to process batch {}: {}", batch_id, e);
+                        break;
+                    }
+                }
+            }
+        });
+    });
+
+    // Writer thread that collects results in order
+    let writer_handle = std::thread::spawn(move || -> PyResult<usize> {
+        let mut received_batches: std::collections::HashMap<usize, RecordBatch> = std::collections::HashMap::new();
+        let mut next_batch_id = 0;
+        let mut total_records = 0;
+        
+        while let Ok((batch_id, batch)) = result_receiver.recv() {
+            received_batches.insert(batch_id, batch);
+            
+            // Write batches in order
+            while let Some(batch) = received_batches.remove(&next_batch_id) {
+                arrow_writer.write(&batch)
+                    .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                        format!("Failed to write batch {}: {}", next_batch_id, e)
+                    ))?;
+                
+                total_records += batch.num_rows();
+                next_batch_id += 1;
+                
+                if next_batch_id % 50 == 0 {
+                    eprintln!("Written {} batches, {} total records", next_batch_id, total_records);
+                }
+            }
+        }
+        
+        // Write any remaining batches
+        for batch_id in next_batch_id.. {
+            if let Some(batch) = received_batches.remove(&batch_id) {
+                arrow_writer.write(&batch)
+                    .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                        format!("Failed to write final batch {}: {}", batch_id, e)
+                    ))?;
+                total_records += batch.num_rows();
+            } else {
+                break;
+            }
+        }
+        
+        arrow_writer.finish()
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow IPC writer: {}", e)))?;
+        
+        Ok(total_records)
+    });
+
+    // Main thread: read BAM sequentially and distribute to workers
+    let mut batch_id = 0;
+    let mut current_batch: Vec<bam::Record> = Vec::with_capacity(effective_batch_size);
+    let mut total_records_read = 0;
+    let target_records = limit.unwrap_or(usize::MAX);
+    
+    loop {
+        // Check for Python interrupts periodically
+        if batch_id % 10 == 0 {
+            Python::with_gil(|py| {
+                py.check_signals().map_err(|e| {
+                    eprintln!("Conversion interrupted by user");
+                    e
+                })
+            })?;
+        }
+
+        let remaining_records = target_records.saturating_sub(total_records_read);
+        if remaining_records == 0 {
+            eprintln!("Reached limit of {} records", target_records);
+            break;
+        }
+
+        let current_batch_size = effective_batch_size.min(remaining_records);
+        
+        // Read a batch of BAM records
+        current_batch.clear();
+        let mut record = bam::Record::default();
+        
+        for _ in 0..current_batch_size {
+            match bam_reader.read_record(&mut record) {
+                Ok(0) => {
+                    // EOF reached
+                    if !current_batch.is_empty() {
+                        // Send the final partial batch
+                        batch_sender.send((batch_id, current_batch.clone()))
+                            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                                format!("Failed to send final batch: {}", e)
+                            ))?;
+                        batch_id += 1;
+                    }
+                    break;
+                }
+                Ok(_) => {
+                    current_batch.push(record.clone());
+                    total_records_read += 1;
+                }
+                Err(e) => {
+                    return Err(PyErr::new::<PyRuntimeError, _>(
+                        format!("Failed to read BAM record at position {}: {}", total_records_read, e)
+                    ));
+                }
+            }
+        }
+        
+        if current_batch.is_empty() {
+            break; // EOF reached
+        }
+        
+        eprintln!("Read batch {} with {} records", batch_id, current_batch.len());
+        
+        // Send batch to workers
+        batch_sender.send((batch_id, current_batch.clone()))
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to send batch {}: {}", batch_id, e)
+            ))?;
+        
+        batch_id += 1;
+    }
+    
+    // Signal end of input
+    drop(batch_sender);
+    drop(result_sender);
+    
+    // Wait for writer to complete
+    let final_record_count = writer_handle.join()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Writer thread failed: {:?}", e)))??;
+    
+    let total_duration = start_time.elapsed();
+    let throughput = final_record_count as f64 / total_duration.as_secs_f64();
+    
+    let completion_msg = format!(
+        "Parallel conversion complete: {} records written to {} in {:?} ({:.0} records/sec using {} threads)", 
+        final_record_count, arrow_ipc_path, total_duration, throughput, effective_threads
+    );
+    eprintln!("{}", completion_msg);
+    
+    Ok(())
+}
+
+// Helper function to process raw BAM records into Arrow RecordBatch
+fn process_bam_records_to_batch(
+    records: &[bam::Record],
+    header: &sam::Header,
+    include_sequence: bool,
+    include_quality: bool,
+    batch_id: usize,
+) -> Result<RecordBatch, Box<dyn std::error::Error + Send + Sync>> {
+    let mut buffers = ReusableBuffers::new(records.len());
+    
+    for record in records {
+        extract_record_data_enhanced(
+            record,
+            header,
+            &mut buffers,
+            include_sequence,
+            include_quality,
+        ).map_err(|e| format!("Failed to extract record data in batch {}: {}", batch_id, e))?;
+    }
+    
+    // Create Arrow arrays from buffers
+    let name_array = Arc::new(StringArray::from(buffers.names.clone()));
+    let chrom_array = Arc::new(StringArray::from(buffers.chroms.clone()));
+    let start_array = Arc::new(UInt32Array::from(buffers.starts.clone()));
+    let end_array = Arc::new(UInt32Array::from(buffers.ends.clone()));
+    let flags_array = Arc::new(UInt32Array::from(buffers.flags.clone()));
+    
+    let mut arrays: Vec<ArrayRef> = vec![
+        name_array,
+        chrom_array, 
+        start_array,
+        end_array,
+        flags_array,
+    ];
+    
+    if include_sequence {
+        if let Some(ref sequences) = buffers.sequences {
+            arrays.push(Arc::new(StringArray::from(sequences.clone())));
+        }
+    }
+    
+    if include_quality {
+        if let Some(ref quality_scores) = buffers.quality_scores {
+            arrays.push(Arc::new(StringArray::from(quality_scores.clone())));
+        }
+    }
+
+    let schema = create_bam_schema(include_sequence, include_quality);
+    RecordBatch::try_new(schema, arrays)
+        .map_err(|e| format!("Failed to create record batch for batch {}: {}", batch_id, e).into())
 }
 
 

@@ -16,6 +16,7 @@ from rogtk.rogtk import (
     fracture_sequences,
     bam_to_parquet,
     bam_to_arrow_ipc,
+    bam_to_arrow_ipc_parallel,
 )
 
 @pl.api.register_expr_namespace("dna")
