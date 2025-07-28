@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use rayon::ThreadPoolBuilder;
 use crossbeam_channel::{bounded, Receiver, Sender};
+use log::debug;
 
 use noodles::{bam, sam, bgzf};
 use sam::alignment::record::cigar::op::Kind as CigarOpKind;
@@ -362,8 +363,8 @@ pub fn bam_to_parquet(
         total_records += batch.num_rows();
         batch_count += 1;
         
-        // More frequent progress updates with memory info
-        if batch_count % 50 == 0 {
+        // Reduce frequency: report every 200 batches instead of 50
+        if batch_count % 200 == 0 {
             let progress_msg = if let Some(limit_val) = limit {
                 format!("Processed {} batches, {} / {} records ({:.1}%) - Batch size: {}", 
                        batch_count, total_records, limit_val, 
@@ -373,10 +374,10 @@ pub fn bam_to_parquet(
                 format!("Processed {} batches, {} total records - Batch size: {}", 
                        batch_count, total_records, current_batch_size)
             };
-            eprintln!("{}", progress_msg);
+            eprintln!("Progress: {}", progress_msg);
             
-            // Force garbage collection every 100 batches
-            if batch_count % 100 == 0 {
+            // Force garbage collection every 400 batches  
+            if batch_count % 400 == 0 {
                 Python::with_gil(|py| {
                     let gc = py.import_bound("gc").unwrap();
                     let _ = gc.call_method0("collect");
@@ -498,7 +499,8 @@ pub fn bam_to_arrow_ipc(
         total_records += batch.num_rows();
         batch_count += 1;
         
-        if batch_count % 50 == 0 {
+        // Reduce frequency: report every 200 batches instead of 50
+        if batch_count % 200 == 0 {
             let progress_msg = if let Some(limit_val) = limit {
                 format!("Processed {} batches, {} / {} records ({:.1}%) - Batch size: {}", 
                        batch_count, total_records, limit_val, 
@@ -508,9 +510,10 @@ pub fn bam_to_arrow_ipc(
                 format!("Processed {} batches, {} total records - Batch size: {}", 
                        batch_count, total_records, current_batch_size)
             };
-            eprintln!("{}", progress_msg);
+            eprintln!("Progress: {}", progress_msg);
             
-            if batch_count % 100 == 0 {
+            // Force garbage collection every 400 batches
+            if batch_count % 400 == 0 {
                 Python::with_gil(|py| {
                     let gc = py.import_bound("gc").unwrap();
                     let _ = gc.call_method0("collect");
@@ -648,16 +651,16 @@ pub fn bam_to_arrow_ipc_parallel(
                 match batch_result {
                     Ok(batch) => {
                         let batch_duration = batch_start.elapsed();
-                        eprintln!("Thread processed batch {} ({} records) in {:?}", 
+                        debug!("Thread processed batch {} ({} records) in {:?}", 
                                 batch_id, batch.num_rows(), batch_duration);
                         
                         if let Err(_) = workers_result_sender.send((batch_id, batch)) {
-                            eprintln!("Failed to send processed batch {}", batch_id);
+                            debug!("Failed to send processed batch {}", batch_id);
                             break;
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to process batch {}: {}", batch_id, e);
+                        debug!("Failed to process batch {}: {}", batch_id, e);
                         break;
                     }
                 }
@@ -684,8 +687,9 @@ pub fn bam_to_arrow_ipc_parallel(
                 total_records += batch.num_rows();
                 next_batch_id += 1;
                 
-                if next_batch_id % 50 == 0 {
-                    eprintln!("Written {} batches, {} total records", next_batch_id, total_records);
+                // Reduce frequency: report every 200 batches instead of 50
+                if next_batch_id % 200 == 0 {
+                    eprintln!("Progress: {} batches written, {} total records", next_batch_id, total_records);
                 }
             }
         }
@@ -728,7 +732,7 @@ pub fn bam_to_arrow_ipc_parallel(
 
         let remaining_records = target_records.saturating_sub(total_records_read);
         if remaining_records == 0 {
-            eprintln!("Reached limit of {} records", target_records);
+            debug!("Reached limit of {} records", target_records);
             break;
         }
 
@@ -768,7 +772,7 @@ pub fn bam_to_arrow_ipc_parallel(
             break; // EOF reached
         }
         
-        eprintln!("Read batch {} with {} records", batch_id, current_batch.len());
+        debug!("Read batch {} with {} records", batch_id, current_batch.len());
         
         // Send batch to workers
         batch_sender.send((batch_id, current_batch.clone()))
