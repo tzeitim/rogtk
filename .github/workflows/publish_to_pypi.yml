@@ -31,9 +31,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Create custom manylinux image with clang
+      - name: Create custom manylinux image with newer clang
         run: |
-          docker run --name temp-container quay.io/pypa/manylinux2014_x86_64 bash -c "
+          docker run --name temp-container quay.io/pypa/manylinux_2_28_x86_64 bash -c "
             yum update -y && 
             yum install -y clang-devel llvm-devel
           "
@@ -47,8 +47,6 @@ jobs:
           args: --release --out dist --find-interpreter --features htslib
           sccache: 'true'
           container: manylinux-with-clang
-        env:
-          LIBCLANG_PATH: /usr/lib64/llvm/libclang.so
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
