@@ -1,0 +1,90 @@
+BAM Conversion Logging Changes Summary
+=====================================
+
+## Changes Made
+
+### 1. Added Debug Logging Support
+- Added `use log::debug;` import to src/bam.rs
+- The `log` crate dependency was already available in Cargo.toml
+
+### 2. Converted Verbose Progress Messages to DEBUG Level
+
+**Parallel Function (`bam_to_arrow_ipc_parallel`):**
+- Thread processing messages: `eprintln!` → `debug!`
+  - "Thread processed batch X (Y records) in Z"
+  - "Failed to send processed batch X"  
+  - "Failed to process batch X: error"
+- Batch reading messages: `eprintln!` → `debug!`
+  - "Read batch X with Y records"
+- Limit reached messages: `eprintln!` → `debug!`
+  - "Reached limit of X records"
+
+### 3. Reduced Progress Reporting Frequency
+
+**All Functions (sequential and parallel):**
+- Progress reports: Every 50 batches → Every 200 batches (4x less frequent)
+- Garbage collection: Every 100 batches → Every 400 batches (4x less frequent)
+- Added "Progress:" prefix to make remaining messages clearer
+
+### 4. Kept Important User Messages
+
+**These messages remain as `eprintln!` (user-visible):**
+- Thread validation warnings:
+  - "Warning: num_threads cannot be 0, using default of 4 threads"
+  - "Notice: For optimal performance, we recommend using 8 threads or fewer..."
+- Startup information:
+  - "Starting parallel BAM to IPC conversion:"
+  - Input/output paths, batch size, threads, sequence/quality flags
+- Progress updates (now every 200 batches): 
+  - "Progress: Processed X batches, Y total records..."
+- Completion messages:
+  - "Parallel conversion complete: X records written..."
+- Error interruption:
+  - "Conversion interrupted by user"
+
+## Result
+
+### Before Changes:
+- Verbose output with batch-by-batch processing details
+- Progress every 50 batches (too frequent for large files)
+- All messages at stderr level
+
+### After Changes:
+- Clean user experience with essential information only
+- DEBUG-level logging for detailed tracing (requires RUST_LOG=debug)
+- Progress every 200 batches (more reasonable frequency)
+- Important user notifications preserved
+
+## Usage
+
+### Normal Operation (Clean Output):
+```bash
+python benchmark_bam_conversion.py input.bam
+```
+
+### Debug Mode (Verbose Logging):
+```bash
+RUST_LOG=debug python benchmark_bam_conversion.py input.bam
+```
+
+## Benefits
+
+1. **Clean User Experience**: Less console spam during normal operation
+2. **Debug-friendly**: Full tracing available when needed with RUST_LOG=debug
+3. **Performance**: Reduced frequency of progress reports (4x less I/O)
+4. **Consistency**: All functions now have consistent logging patterns
+5. **Maintainability**: Clear separation between user messages and debug info
+
+## Files Modified
+
+- `src/bam.rs`: Updated logging in all three functions
+  - `bam_to_parquet()` 
+  - `bam_to_arrow_ipc()`
+  - `bam_to_arrow_ipc_parallel()`
+
+## No Breaking Changes
+
+- All function signatures remain identical
+- User-facing behavior is the same (just cleaner output)
+- Debug information is still available via environment variable
+- Performance characteristics unchanged

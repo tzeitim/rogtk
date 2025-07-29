@@ -26,7 +26,9 @@ mod umi_score;
 
 use crate::single_fastq::{fastq_to_parquet};
 use crate::fracture::{fracture_fasta, fracture_sequences};
-use crate::bam::{bam_to_parquet};
+use crate::bam::{bam_to_parquet, bam_to_arrow_ipc, bam_to_arrow_ipc_parallel, bam_to_arrow_ipc_gzp_parallel};
+#[cfg(feature = "htslib")]
+use crate::bam::bam_to_arrow_ipc_htslib_parallel;
 
 
 //extern crate fasten;
@@ -468,6 +470,11 @@ fn rogtk(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fracture_fasta, m)?)?;
     m.add_function(wrap_pyfunction!(fracture_sequences, m)?)?;
     m.add_function(wrap_pyfunction!(bam_to_parquet, m)?)?;
+    m.add_function(wrap_pyfunction!(bam_to_arrow_ipc, m)?)?;
+    m.add_function(wrap_pyfunction!(bam_to_arrow_ipc_parallel, m)?)?;
+    m.add_function(wrap_pyfunction!(bam_to_arrow_ipc_gzp_parallel, m)?)?;
+    #[cfg(feature = "htslib")]
+    m.add_function(wrap_pyfunction!(bam_to_arrow_ipc_htslib_parallel, m)?)?;
 
     //m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

@@ -6,16 +6,40 @@ from polars.plugins import register_plugin_function
 from polars.type_aliases import IntoExpr
 from .utils import *
 
-from rogtk.rogtk import (
-    sum_as_string,
-    oparse_cigar,
-    merge_paired_fastqs,
-    parse_paired_fastqs,
-    fastq_to_parquet,
-    fracture_fasta,
-    fracture_sequences,
-    bam_to_parquet,
-)
+# Try to import all functions including HTSlib if available
+try:
+    from rogtk.rogtk import (
+        sum_as_string,
+        oparse_cigar,
+        merge_paired_fastqs,
+        parse_paired_fastqs,
+        fastq_to_parquet,
+        fracture_fasta,
+        fracture_sequences,
+        bam_to_parquet,
+        bam_to_arrow_ipc,
+        bam_to_arrow_ipc_parallel,
+        bam_to_arrow_ipc_gzp_parallel,
+        bam_to_arrow_ipc_htslib_parallel,
+    )
+    _HTSLIB_AVAILABLE = True
+except ImportError:
+    # Fallback: import without HTSlib function
+    from rogtk.rogtk import (
+        sum_as_string,
+        oparse_cigar,
+        merge_paired_fastqs,
+        parse_paired_fastqs,
+        fastq_to_parquet,
+        fracture_fasta,
+        fracture_sequences,
+        bam_to_parquet,
+        bam_to_arrow_ipc,
+        bam_to_arrow_ipc_parallel,
+        bam_to_arrow_ipc_gzp_parallel,
+    )
+    _HTSLIB_AVAILABLE = False
+    bam_to_arrow_ipc_htslib_parallel = None
 
 @pl.api.register_expr_namespace("dna")
 class DnaNamespace:

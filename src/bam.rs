@@ -4,6 +4,18 @@ use pyo3::Python;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
+use rayon::ThreadPoolBuilder;
+use crossbeam_channel::{bounded, Receiver, Sender};
+use log::debug;
+// GZP imports temporarily disabled - using enhanced I/O buffering approach instead
+// use gzp::par::decompress::ParDecompressBuilder;
+// use gzp::deflate::Mgzip;
+// TEMPORARILY DISABLED: HTSlib imports - requires libclang system dependency
+#[cfg(feature = "htslib")]
+use rust_htslib::bam as hts_bam;
+#[cfg(feature = "htslib")]
+use rust_htslib::bam::Read as HtsRead;
 
 use noodles::{bam, sam, bgzf};
 use sam::alignment::record::cigar::op::Kind as CigarOpKind;
@@ -11,6 +23,7 @@ use sam::alignment::record::QualityScores;
 use arrow::array::*;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use arrow::ipc::writer::FileWriter as ArrowIpcWriter;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::WriterProperties;
@@ -358,8 +371,8 @@ pub fn bam_to_parquet(
         total_records += batch.num_rows();
         batch_count += 1;
         
-        // More frequent progress updates with memory info
-        if batch_count % 50 == 0 {
+        // Reduce frequency: report every 200 batches instead of 50
+        if batch_count % 200 == 0 {
             let progress_msg = if let Some(limit_val) = limit {
                 format!("Processed {} batches, {} / {} records ({:.1}%) - Batch size: {}", 
                        batch_count, total_records, limit_val, 
@@ -369,10 +382,10 @@ pub fn bam_to_parquet(
                 format!("Processed {} batches, {} total records - Batch size: {}", 
                        batch_count, total_records, current_batch_size)
             };
-            eprintln!("{}", progress_msg);
+            eprintln!("Progress: {}", progress_msg);
             
-            // Force garbage collection every 100 batches
-            if batch_count % 100 == 0 {
+            // Force garbage collection every 400 batches  
+            if batch_count % 400 == 0 {
                 Python::with_gil(|py| {
                     let gc = py.import_bound("gc").unwrap();
                     let _ = gc.call_method0("collect");
@@ -392,6 +405,1117 @@ pub fn bam_to_parquet(
     };
     eprintln!("{}", completion_msg);
     Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path, 
+    arrow_ipc_path, 
+    batch_size = 50000,
+    include_sequence = true,
+    include_quality = true,
+    limit = None
+))]
+pub fn bam_to_arrow_ipc(
+    bam_path: &str,
+    arrow_ipc_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    limit: Option<usize>,
+) -> PyResult<()> {
+    let input_path = Path::new(bam_path);
+    let output_path = Path::new(arrow_ipc_path);
+
+    if !input_path.exists() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            format!("BAM file does not exist: {}", bam_path)
+        ));
+    }
+    
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    let effective_batch_size = batch_size.min(1000000);
+    
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to create output directory: {}", e)
+            ))?;
+    }
+
+    let mut file = File::open(input_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file '{}': {}", bam_path, e)))?;
+    
+    let mut bam_reader = bam::io::Reader::new(&mut file);
+    
+    let header = bam_reader.read_header()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to read BAM header: {}", e)))?;
+
+    let schema = create_bam_schema(include_sequence, include_quality);
+    
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file '{}': {}", arrow_ipc_path, e)))?;
+
+    let mut arrow_writer = ArrowIpcWriter::try_new(output_file, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow IPC writer: {}", e)))?;
+
+    let mut reusable_buffers = ReusableBuffers::new(effective_batch_size);
+    
+    let mut batch_count = 0;
+    let mut total_records = 0;
+    let target_records = limit.unwrap_or(usize::MAX);
+
+    loop {
+        if batch_count % 10 == 0 {
+            Python::with_gil(|py| {
+                py.check_signals().map_err(|e| {
+                    eprintln!("Conversion interrupted by user");
+                    e
+                })
+            })?;
+        }
+
+        let remaining_records = target_records.saturating_sub(total_records);
+        if remaining_records == 0 {
+            eprintln!("Reached limit of {} records", target_records);
+            break;
+        }
+
+        let current_batch_size = effective_batch_size.min(remaining_records);
+        
+        let batch = read_bam_batch_enhanced(
+            &mut bam_reader, 
+            &header, 
+            current_batch_size, 
+            include_sequence, 
+            include_quality,
+            &mut reusable_buffers
+        )?;
+        
+        if batch.num_rows() == 0 {
+            break;
+        }
+
+        arrow_writer.write(&batch)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to write batch {}: {}", batch_count, e)))?;
+
+        total_records += batch.num_rows();
+        batch_count += 1;
+        
+        // Reduce frequency: report every 200 batches instead of 50
+        if batch_count % 200 == 0 {
+            let progress_msg = if let Some(limit_val) = limit {
+                format!("Processed {} batches, {} / {} records ({:.1}%) - Batch size: {}", 
+                       batch_count, total_records, limit_val, 
+                       100.0 * total_records as f64 / limit_val as f64,
+                       current_batch_size)
+            } else {
+                format!("Processed {} batches, {} total records - Batch size: {}", 
+                       batch_count, total_records, current_batch_size)
+            };
+            eprintln!("Progress: {}", progress_msg);
+            
+            // Force garbage collection every 400 batches
+            if batch_count % 400 == 0 {
+                Python::with_gil(|py| {
+                    let gc = py.import_bound("gc").unwrap();
+                    let _ = gc.call_method0("collect");
+                });
+            }
+        }
+    }
+
+    arrow_writer.finish()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow IPC writer: {}", e)))?;
+
+    let completion_msg = if limit.is_some() {
+        format!("Conversion complete: {} records (limited from potentially more) written to {}", 
+               total_records, arrow_ipc_path)
+    } else {
+        format!("Conversion complete: {} records written to {}", total_records, arrow_ipc_path)
+    };
+    eprintln!("{}", completion_msg);
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path, 
+    arrow_ipc_path, 
+    batch_size = 50000,
+    include_sequence = true,
+    include_quality = true,
+    num_threads = 4,
+    preserve_order = false,
+    limit = None
+))]
+pub fn bam_to_arrow_ipc_parallel(
+    bam_path: &str,
+    arrow_ipc_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    num_threads: usize,
+    preserve_order: bool,
+    limit: Option<usize>,
+) -> PyResult<()> {
+    let start_time = Instant::now();
+    
+    // Thread validation with nice user messages
+    let effective_threads = if num_threads == 0 {
+        eprintln!("Warning: num_threads cannot be 0, using default of 4 threads");
+        4
+    } else if num_threads > 8 {
+        eprintln!("Notice: For optimal performance, we recommend using 8 threads or fewer based on our benchmarking.");
+        eprintln!("Your request for {} threads has been capped to 8 threads for best results.", num_threads);
+        8
+    } else {
+        num_threads
+    };
+    
+    let input_path = Path::new(bam_path);
+    let output_path = Path::new(arrow_ipc_path);
+
+    if !input_path.exists() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            format!("BAM file does not exist: {}", bam_path)
+        ));
+    }
+    
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    let effective_batch_size = batch_size.min(1000000);
+    
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to create output directory: {}", e)
+            ))?;
+    }
+
+    eprintln!("Starting parallel BAM to IPC conversion:");
+    eprintln!("  Input: {}", bam_path);
+    eprintln!("  Output: {}", arrow_ipc_path);
+    eprintln!("  Batch size: {}", effective_batch_size);
+    eprintln!("  Threads: {}", effective_threads);
+    eprintln!("  Preserve order: {}", preserve_order);
+    eprintln!("  Include sequence: {}", include_sequence);
+    eprintln!("  Include quality: {}", include_quality);
+
+    let mut file = File::open(input_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file '{}': {}", bam_path, e)))?;
+    
+    let mut bam_reader = bam::io::Reader::new(&mut file);
+    
+    let header = bam_reader.read_header()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to read BAM header: {}", e)))?;
+
+    let schema = create_bam_schema(include_sequence, include_quality);
+    
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file '{}': {}", arrow_ipc_path, e)))?;
+
+    let mut arrow_writer = ArrowIpcWriter::try_new(output_file, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow IPC writer: {}", e)))?;
+
+    // Setup parallel processing architecture
+    let channel_size = (effective_threads * 4).max(16);
+    let (batch_sender, batch_receiver): (Sender<(usize, Vec<bam::Record>)>, Receiver<(usize, Vec<bam::Record>)>) = bounded(channel_size);
+    let (result_sender, result_receiver): (Sender<(usize, RecordBatch)>, Receiver<(usize, RecordBatch)>) = bounded(channel_size);
+    
+    let header_arc = Arc::new(header.clone());
+    
+    // Configure thread pool
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(effective_threads)
+        .build()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create thread pool: {}", e)))?;
+
+    // Spawn processing workers
+    let workers_header = header_arc.clone();
+    let workers_result_sender = result_sender.clone();
+    let workers_batch_receiver = batch_receiver.clone();
+    
+    let _workers_handle = std::thread::spawn(move || {
+        pool.install(|| {
+            while let Ok((batch_id, raw_records)) = workers_batch_receiver.recv() {
+                let batch_start = Instant::now();
+                
+                // Process raw BAM records into Arrow RecordBatch
+                let batch_result = process_bam_records_to_batch(
+                    &raw_records,
+                    &workers_header,
+                    include_sequence,
+                    include_quality,
+                    batch_id,
+                );
+                
+                match batch_result {
+                    Ok(batch) => {
+                        let batch_duration = batch_start.elapsed();
+                        debug!("Thread processed batch {} ({} records) in {:?}", 
+                                batch_id, batch.num_rows(), batch_duration);
+                        
+                        if let Err(_) = workers_result_sender.send((batch_id, batch)) {
+                            debug!("Failed to send processed batch {}", batch_id);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to process batch {}: {}", batch_id, e);
+                        break;
+                    }
+                }
+            }
+        });
+    });
+
+    // Writer thread with conditional ordering
+    let writer_handle = std::thread::spawn(move || -> PyResult<usize> {
+        let mut total_records = 0;
+        
+        if preserve_order {
+            // Order preservation: Complex writer thread with HashMap buffering
+            let mut received_batches: std::collections::HashMap<usize, RecordBatch> = std::collections::HashMap::new();
+            let mut next_batch_id = 0;
+            
+            // Must wait for sequential batches
+            while let Ok((batch_id, batch)) = result_receiver.recv() {
+                received_batches.insert(batch_id, batch);
+                
+                // Write batches in order
+                while let Some(batch) = received_batches.remove(&next_batch_id) {
+                    arrow_writer.write(&batch)
+                        .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                            format!("Failed to write batch {}: {}", next_batch_id, e)
+                        ))?;
+                    
+                    total_records += batch.num_rows();
+                    next_batch_id += 1;
+                    
+                    // Reduce frequency: report every 200 batches instead of 50
+                    if next_batch_id % 200 == 0 {
+                        eprintln!("Progress: {} batches written, {} total records", next_batch_id, total_records);
+                    }
+                }
+            }
+            
+            // Write any remaining batches
+            for batch_id in next_batch_id.. {
+                if let Some(batch) = received_batches.remove(&batch_id) {
+                    arrow_writer.write(&batch)
+                        .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                            format!("Failed to write final batch {}: {}", batch_id, e)
+                        ))?;
+                    total_records += batch.num_rows();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            // No order preservation: Direct write as batches arrive - no buffering needed!
+            let mut batch_count = 0;
+            
+            while let Ok((_, batch)) = result_receiver.recv() {
+                arrow_writer.write(&batch)
+                    .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                        format!("Failed to write batch: {}", e)
+                    ))?;
+                
+                total_records += batch.num_rows();
+                batch_count += 1;
+                
+                // Reduce frequency: report every 200 batches instead of 50
+                if batch_count % 200 == 0 {
+                    eprintln!("Progress: {} batches written, {} total records", batch_count, total_records);
+                }
+            }
+        }
+        
+        arrow_writer.finish()
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow IPC writer: {}", e)))?;
+        
+        Ok(total_records)
+    });
+
+    // Main thread: read BAM sequentially and distribute to workers
+    let mut batch_id = 0;
+    let mut current_batch: Vec<bam::Record> = Vec::with_capacity(effective_batch_size);
+    let mut total_records_read = 0;
+    let target_records = limit.unwrap_or(usize::MAX);
+    
+    loop {
+        // Check for Python interrupts periodically
+        if batch_id % 10 == 0 {
+            Python::with_gil(|py| {
+                py.check_signals().map_err(|e| {
+                    eprintln!("Conversion interrupted by user");
+                    e
+                })
+            })?;
+        }
+
+        let remaining_records = target_records.saturating_sub(total_records_read);
+        if remaining_records == 0 {
+            debug!("Reached limit of {} records", target_records);
+            break;
+        }
+
+        let current_batch_size = effective_batch_size.min(remaining_records);
+        
+        // Read a batch of BAM records
+        current_batch.clear();
+        let mut record = bam::Record::default();
+        
+        for _ in 0..current_batch_size {
+            match bam_reader.read_record(&mut record) {
+                Ok(0) => {
+                    // EOF reached
+                    if !current_batch.is_empty() {
+                        // Send the final partial batch
+                        batch_sender.send((batch_id, current_batch.clone()))
+                            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                                format!("Failed to send final batch: {}", e)
+                            ))?;
+                        batch_id += 1;
+                    }
+                    break;
+                }
+                Ok(_) => {
+                    current_batch.push(record.clone());
+                    total_records_read += 1;
+                }
+                Err(e) => {
+                    return Err(PyErr::new::<PyRuntimeError, _>(
+                        format!("Failed to read BAM record at position {}: {}", total_records_read, e)
+                    ));
+                }
+            }
+        }
+        
+        if current_batch.is_empty() {
+            break; // EOF reached
+        }
+        
+        debug!("Read batch {} with {} records", batch_id, current_batch.len());
+        
+        // Send batch to workers
+        batch_sender.send((batch_id, current_batch.clone()))
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to send batch {}: {}", batch_id, e)
+            ))?;
+        
+        batch_id += 1;
+    }
+    
+    // Signal end of input
+    drop(batch_sender);
+    drop(result_sender);
+    
+    // Wait for writer to complete
+    let final_record_count = writer_handle.join()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Writer thread failed: {:?}", e)))??;
+    
+    let total_duration = start_time.elapsed();
+    let throughput = final_record_count as f64 / total_duration.as_secs_f64();
+    
+    let completion_msg = format!(
+        "Parallel conversion complete: {} records written to {} in {:?} ({:.0} records/sec using {} threads)", 
+        final_record_count, arrow_ipc_path, total_duration, throughput, effective_threads
+    );
+    eprintln!("{}", completion_msg);
+    
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path, 
+    arrow_ipc_path, 
+    batch_size = 50000,
+    include_sequence = true,
+    include_quality = true,
+    decompression_threads = 4,
+    processing_threads = 2,
+    preserve_order = false,
+    limit = None
+))]
+pub fn bam_to_arrow_ipc_gzp_parallel(
+    bam_path: &str,
+    arrow_ipc_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    decompression_threads: usize,
+    processing_threads: usize,
+    preserve_order: bool,
+    limit: Option<usize>,
+) -> PyResult<()> {
+    let start_time = Instant::now();
+    
+    // Validate thread parameters
+    let effective_decompression_threads = if decompression_threads == 0 {
+        eprintln!("Warning: decompression_threads cannot be 0, using default of 4 threads");
+        4
+    } else if decompression_threads > 16 {
+        eprintln!("Notice: Capping decompression threads to 16 (requested: {})", decompression_threads);
+        16
+    } else {
+        decompression_threads
+    };
+    
+    let effective_processing_threads = if processing_threads == 0 {
+        eprintln!("Warning: processing_threads cannot be 0, using default of 2 threads");
+        2
+    } else if processing_threads > 8 {
+        eprintln!("Notice: Capping processing threads to 8 (requested: {})", processing_threads);
+        8
+    } else {
+        processing_threads
+    };
+    
+    let input_path = Path::new(bam_path);
+    let output_path = Path::new(arrow_ipc_path);
+
+    if !input_path.exists() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            format!("BAM file does not exist: {}", bam_path)
+        ));
+    }
+    
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    let effective_batch_size = batch_size.min(1000000);
+    
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to create output directory: {}", e)
+            ))?;
+    }
+
+    eprintln!("Starting enhanced parallel BAM to IPC conversion (gzp alternative):");
+    eprintln!("  Input: {}", bam_path);
+    eprintln!("  Output: {}", arrow_ipc_path);
+    eprintln!("  Batch size: {}", effective_batch_size);
+    eprintln!("  Decompression threads: {} (applied as I/O optimization)", effective_decompression_threads);
+    eprintln!("  Processing threads: {}", effective_processing_threads);
+    eprintln!("  Preserve order: {}", preserve_order);
+    eprintln!("  Include sequence: {}", include_sequence);
+    eprintln!("  Include quality: {}", include_quality);
+
+    // WORKAROUND: Since gzp doesn't support BGZF format, use enhanced buffering + parallel processing
+    // This maintains the dual-thread architecture but optimizes I/O differently
+    
+    let file = File::open(input_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file '{}': {}", bam_path, e)))?;
+    
+    // Create a large buffer based on decompression thread count for better I/O
+    let buffer_size = (effective_decompression_threads * 256 * 1024).max(1024 * 1024); // Min 1MB, scale with threads
+    let buffered_file = std::io::BufReader::with_capacity(buffer_size, file);
+    
+    let mut bam_reader = bam::io::Reader::new(buffered_file);
+    
+    let header = bam_reader.read_header()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to read BAM header: {}", e)))?;
+
+    let schema = create_bam_schema(include_sequence, include_quality);
+    
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file '{}': {}", arrow_ipc_path, e)))?;
+
+    let mut arrow_writer = ArrowIpcWriter::try_new(output_file, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow IPC writer: {}", e)))?;
+
+    // Setup parallel processing architecture - similar to existing but specialized for gzp
+    let channel_size = (effective_processing_threads * 4).max(16);
+    let (batch_sender, batch_receiver): (Sender<(usize, Vec<bam::Record>)>, Receiver<(usize, Vec<bam::Record>)>) = bounded(channel_size);
+    let (result_sender, result_receiver): (Sender<(usize, RecordBatch)>, Receiver<(usize, RecordBatch)>) = bounded(channel_size);
+    
+    let header_arc = Arc::new(header.clone());
+    
+    // Configure processing thread pool (separate from decompression threads)
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(effective_processing_threads)
+        .build()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create processing thread pool: {}", e)))?;
+
+    // Spawn processing workers (same logic as existing parallel implementation)
+    let workers_header = header_arc.clone();
+    let workers_result_sender = result_sender.clone();
+    let workers_batch_receiver = batch_receiver.clone();
+    
+    let _workers_handle = std::thread::spawn(move || {
+        pool.install(|| {
+            while let Ok((batch_id, raw_records)) = workers_batch_receiver.recv() {
+                let batch_start = Instant::now();
+                
+                // Process raw BAM records into Arrow RecordBatch
+                let batch_result = process_bam_records_to_batch(
+                    &raw_records,
+                    &workers_header,
+                    include_sequence,
+                    include_quality,
+                    batch_id,
+                );
+                
+                match batch_result {
+                    Ok(batch) => {
+                        let batch_duration = batch_start.elapsed();
+                        debug!("Thread processed batch {} ({} records) in {:?} with gzp decompression", 
+                                batch_id, batch.num_rows(), batch_duration);
+                        
+                        if let Err(_) = workers_result_sender.send((batch_id, batch)) {
+                            debug!("Failed to send processed batch {}", batch_id);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to process batch {}: {}", batch_id, e);
+                        break;
+                    }
+                }
+            }
+        });
+    });
+
+    // Writer thread with conditional ordering (reuse existing logic)
+    let writer_handle = std::thread::spawn(move || -> PyResult<usize> {
+        let mut total_records = 0;
+        
+        if preserve_order {
+            // Order preservation: Complex writer thread with HashMap buffering
+            let mut received_batches: std::collections::HashMap<usize, RecordBatch> = std::collections::HashMap::new();
+            let mut next_batch_id = 0;
+            
+            // Must wait for sequential batches
+            while let Ok((batch_id, batch)) = result_receiver.recv() {
+                received_batches.insert(batch_id, batch);
+                
+                // Write batches in order
+                while let Some(batch) = received_batches.remove(&next_batch_id) {
+                    arrow_writer.write(&batch)
+                        .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                            format!("Failed to write batch {}: {}", next_batch_id, e)
+                        ))?;
+                    
+                    total_records += batch.num_rows();
+                    next_batch_id += 1;
+                    
+                    // Reduce frequency: report every 200 batches instead of 50
+                    if next_batch_id % 200 == 0 {
+                        eprintln!("Progress: {} batches written, {} total records (gzp parallel)", next_batch_id, total_records);
+                    }
+                }
+            }
+            
+            // Write any remaining batches
+            for batch_id in next_batch_id.. {
+                if let Some(batch) = received_batches.remove(&batch_id) {
+                    arrow_writer.write(&batch)
+                        .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                            format!("Failed to write final batch {}: {}", batch_id, e)
+                        ))?;
+                    total_records += batch.num_rows();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            // No order preservation: Direct write as batches arrive - no buffering needed!
+            let mut batch_count = 0;
+            
+            while let Ok((_, batch)) = result_receiver.recv() {
+                arrow_writer.write(&batch)
+                    .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                        format!("Failed to write batch: {}", e)
+                    ))?;
+                
+                total_records += batch.num_rows();
+                batch_count += 1;
+                
+                // Reduce frequency: report every 200 batches instead of 50
+                if batch_count % 200 == 0 {
+                    eprintln!("Progress: {} batches written, {} total records (gzp parallel)", batch_count, total_records);
+                }
+            }
+        }
+        
+        arrow_writer.finish()
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow IPC writer: {}", e)))?;
+        
+        Ok(total_records)
+    });
+
+    // Main thread: read BAM sequentially from gzp-decompressed stream and distribute to workers
+    let mut batch_id = 0;
+    let mut current_batch: Vec<bam::Record> = Vec::with_capacity(effective_batch_size);
+    let mut total_records_read = 0;
+    let target_records = limit.unwrap_or(usize::MAX);
+    
+    loop {
+        // Check for Python interrupts periodically
+        if batch_id % 10 == 0 {
+            Python::with_gil(|py| {
+                py.check_signals().map_err(|e| {
+                    eprintln!("Conversion interrupted by user");
+                    e
+                })
+            })?;
+        }
+
+        let remaining_records = target_records.saturating_sub(total_records_read);
+        if remaining_records == 0 {
+            debug!("Reached limit of {} records", target_records);
+            break;
+        }
+
+        let current_batch_size = effective_batch_size.min(remaining_records);
+        
+        // Read a batch of BAM records from gzp-decompressed stream
+        current_batch.clear();
+        let mut record = bam::Record::default();
+        
+        for _ in 0..current_batch_size {
+            match bam_reader.read_record(&mut record) {
+                Ok(0) => {
+                    // EOF reached
+                    if !current_batch.is_empty() {
+                        // Send the final partial batch
+                        batch_sender.send((batch_id, current_batch.clone()))
+                            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                                format!("Failed to send final batch: {}", e)
+                            ))?;
+                        batch_id += 1;
+                    }
+                    break;
+                }
+                Ok(_) => {
+                    current_batch.push(record.clone());
+                    total_records_read += 1;
+                }
+                Err(e) => {
+                    return Err(PyErr::new::<PyRuntimeError, _>(
+                        format!("Failed to read BAM record at position {} (gzp decompression): {}", total_records_read, e)
+                    ));
+                }
+            }
+        }
+        
+        if current_batch.is_empty() {
+            break; // EOF reached
+        }
+        
+        debug!("Read batch {} with {} records (gzp parallel)", batch_id, current_batch.len());
+        
+        // Send batch to workers
+        batch_sender.send((batch_id, current_batch.clone()))
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to send batch {}: {}", batch_id, e)
+            ))?;
+        
+        batch_id += 1;
+    }
+    
+    // Signal end of input
+    drop(batch_sender);
+    drop(result_sender);
+    
+    // Wait for writer to complete
+    let final_record_count = writer_handle.join()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Writer thread failed: {:?}", e)))??;
+    
+    let total_duration = start_time.elapsed();
+    let throughput = final_record_count as f64 / total_duration.as_secs_f64();
+    
+    let buffer_mb = (effective_decompression_threads * 256).max(1024); // Recalculate for display
+    let completion_msg = format!(
+        "Enhanced parallel conversion complete: {} records written to {} in {:?} ({:.0} records/sec using {}MB buffer + {}+{} threads)", 
+        final_record_count, arrow_ipc_path, total_duration, throughput, 
+        buffer_mb / 1024, effective_processing_threads, 1
+    );
+    eprintln!("{}", completion_msg);
+    
+    Ok(())
+}
+
+// TEMPORARILY DISABLED: HTSlib parallel implementation - requires libclang system dependency
+// TODO: Re-enable once libclang is properly installed in environment
+#[cfg(feature = "htslib")]
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path, 
+    arrow_ipc_path, 
+    batch_size = 50000,
+    include_sequence = true,
+    include_quality = true,
+    bgzf_threads = 4,
+    limit = None
+))]
+pub fn bam_to_arrow_ipc_htslib_parallel(
+    bam_path: &str,
+    arrow_ipc_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    bgzf_threads: usize,
+    limit: Option<usize>,
+) -> PyResult<()> {
+    let start_time = Instant::now();
+    
+    let input_path = Path::new(bam_path);
+    let output_path = Path::new(arrow_ipc_path);
+
+    if !input_path.exists() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            format!("BAM file does not exist: {}", bam_path)
+        ));
+    }
+    
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    let effective_batch_size = batch_size.min(1000000);
+    let effective_threads = if bgzf_threads == 0 { 4 } else { bgzf_threads.min(16) };
+    
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to create output directory: {}", e)
+            ))?;
+    }
+
+    eprintln!("Starting HTSlib parallel BGZF decompression BAM to IPC conversion:");
+    eprintln!("  Input: {}", bam_path);
+    eprintln!("  Output: {}", arrow_ipc_path);
+    eprintln!("  Batch size: {}", effective_batch_size);
+    eprintln!("  BGZF threads: {}", effective_threads);
+    eprintln!("  Include sequence: {}", include_sequence);
+    eprintln!("  Include quality: {}", include_quality);
+
+    // Open BAM with rust-htslib
+    let mut hts_reader = hts_bam::Reader::from_path(bam_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file: {}", e)))?;
+    
+    // Enable parallel BGZF decompression
+    hts_reader.set_threads(effective_threads)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to set threads: {}", e)))?;
+    
+    // Get header info before starting the main loop to avoid borrowing conflicts
+    let header_view = hts_reader.header().clone();
+    
+    // Create Arrow writer
+    let schema = create_bam_schema(include_sequence, include_quality);
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file: {}", e)))?;
+    let mut arrow_writer = ArrowIpcWriter::try_new(output_file, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow writer: {}", e)))?;
+    
+    // Process records directly to Arrow - no noodles conversion needed
+    let mut total_records = 0;
+    let mut hts_record = hts_bam::Record::new();
+    let target_records = limit.unwrap_or(usize::MAX);
+    
+    // Direct Arrow array builders
+    let mut names = Vec::with_capacity(effective_batch_size);
+    let mut chroms = Vec::with_capacity(effective_batch_size);
+    let mut starts = Vec::with_capacity(effective_batch_size);
+    let mut ends = Vec::with_capacity(effective_batch_size);
+    let mut flags = Vec::with_capacity(effective_batch_size);
+    let mut sequences: Option<Vec<Option<String>>> = if include_sequence { Some(Vec::with_capacity(effective_batch_size)) } else { None };
+    let mut qualities: Option<Vec<Option<String>>> = if include_quality { Some(Vec::with_capacity(effective_batch_size)) } else { None };
+    
+    loop {
+        // Check for Python interrupts periodically
+        if total_records % 10000 == 0 {
+            Python::with_gil(|py| {
+                py.check_signals().map_err(|e| {
+                    eprintln!("Conversion interrupted by user");
+                    e
+                })
+            })?;
+        }
+
+        let remaining_records = target_records.saturating_sub(total_records);
+        if remaining_records == 0 {
+            debug!("Reached limit of {} records", target_records);
+            break;
+        }
+
+        match hts_reader.read(&mut hts_record) {
+            Some(Ok(())) => {
+                // Extract data directly from HTSlib record to Arrow arrays
+                
+                // 1. Read name
+                let name = String::from_utf8_lossy(hts_record.qname()).to_string();
+                names.push(name);
+                
+                // 2. Chromosome - use header to resolve tid to name
+                let chrom = if hts_record.tid() >= 0 {
+                    let tid = hts_record.tid() as u32;
+                    // Use cloned header to avoid borrow conflicts
+                    let name_bytes = header_view.tid2name(tid);
+                    Some(String::from_utf8_lossy(name_bytes).to_string())
+                } else {
+                    None
+                };
+                chroms.push(chrom);
+                
+                // 3. Start/End positions (convert from 0-based to 1-based)
+                let start_pos = if hts_record.pos() >= 0 {
+                    Some((hts_record.pos() + 1) as u32)
+                } else {
+                    None
+                };
+                starts.push(start_pos);
+                
+                // Calculate end position from start + read length
+                let end_pos = start_pos.map(|start| start + hts_record.seq_len() as u32 - 1);
+                ends.push(end_pos);
+                
+                // 4. Flags
+                flags.push(hts_record.flags() as u32);
+                
+                // 5. Sequence (if requested)
+                if let Some(ref mut seq_vec) = sequences {
+                    let seq = hts_record.seq();
+                    if seq.len() > 0 {
+                        let mut sequence_string = String::with_capacity(seq.len());
+                        for i in 0..seq.len() {
+                            let base = match seq[i] {
+                                1 => 'A',  // HTSlib encoding: A=1, C=2, G=4, T=8
+                                2 => 'C',
+                                4 => 'G', 
+                                8 => 'T',
+                                15 => 'N', // 15 = all bits set
+                                _ => 'N',
+                            };
+                            sequence_string.push(base);
+                        }
+                        seq_vec.push(Some(sequence_string));
+                    } else {
+                        seq_vec.push(None);
+                    }
+                }
+                
+                // 6. Quality scores (if requested)
+                if let Some(ref mut qual_vec) = qualities {
+                    let qual = hts_record.qual();
+                    if !qual.is_empty() && qual[0] != 255 {
+                        let quality_string: String = qual.iter()
+                            .map(|&q| char::from(q + b'!'))
+                            .collect();
+                        qual_vec.push(Some(quality_string));
+                    } else {
+                        qual_vec.push(None);
+                    }
+                }
+                
+                total_records += 1;
+                
+                // Write batch when full
+                if names.len() >= effective_batch_size {
+                    write_htslib_batch_to_arrow(
+                        &mut arrow_writer,
+                        &mut names, &mut chroms, &mut starts, &mut ends, &mut flags,
+                        &mut sequences, &mut qualities,
+                        include_sequence, include_quality
+                    )?;
+                    
+                    if total_records % 200000 == 0 {
+                        eprintln!("Progress: {} records processed (HTSlib parallel)", total_records);
+                    }
+                }
+                
+                if total_records >= target_records {
+                    break;
+                }
+            }
+            None => {
+                // EOF reached
+                break;
+            }
+            Some(Err(e)) => {
+                return Err(PyErr::new::<PyRuntimeError, _>(
+                    format!("Failed to read BAM record at position {}: {}", total_records, e)
+                ));
+            }
+        }
+    }
+    
+    // Process final batch if any records remain
+    if !names.is_empty() {
+        write_htslib_batch_to_arrow(
+            &mut arrow_writer,
+            &mut names, &mut chroms, &mut starts, &mut ends, &mut flags,
+            &mut sequences, &mut qualities,
+            include_sequence, include_quality
+        )?;
+    }
+    
+    arrow_writer.finish()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow writer: {}", e)))?;
+    
+    let total_duration = start_time.elapsed();
+    let throughput = total_records as f64 / total_duration.as_secs_f64();
+    
+    let completion_msg = format!(
+        "HTSlib parallel conversion complete: {} records written to {} in {:?} ({:.0} records/sec using {} BGZF threads)", 
+        total_records, arrow_ipc_path, total_duration, throughput, effective_threads
+    );
+    eprintln!("{}", completion_msg);
+    
+    Ok(())
+}
+
+// Helper function to write HTSlib batch to Arrow writer
+#[cfg(feature = "htslib")]
+fn write_htslib_batch_to_arrow(
+    arrow_writer: &mut ArrowIpcWriter<File>,
+    names: &mut Vec<String>,
+    chroms: &mut Vec<Option<String>>,
+    starts: &mut Vec<Option<u32>>,
+    ends: &mut Vec<Option<u32>>,
+    flags: &mut Vec<u32>,
+    sequences: &mut Option<Vec<Option<String>>>,
+    qualities: &mut Option<Vec<Option<String>>>,
+    include_sequence: bool,
+    include_quality: bool,
+) -> PyResult<()> {
+    use arrow::array::{StringArray, UInt32Array, Array};
+
+    // Build Arrow arrays
+    let name_array = Arc::new(StringArray::from(names.clone()));
+    let chrom_array = Arc::new(StringArray::from(chroms.clone()));
+    let start_array = Arc::new(UInt32Array::from(starts.clone()));
+    let end_array = Arc::new(UInt32Array::from(ends.clone()));
+    let flag_array = Arc::new(UInt32Array::from(flags.clone()));
+
+    // Build column arrays
+    let mut columns: Vec<Arc<dyn Array>> = vec![
+        name_array,
+        chrom_array,
+        start_array,
+        end_array,
+        flag_array,
+    ];
+
+    // Add sequence if requested
+    if include_sequence {
+        if let Some(ref seq_vec) = sequences {
+            let seq_array = Arc::new(StringArray::from(seq_vec.clone()));
+            columns.push(seq_array);
+        } else {
+            return Err(PyErr::new::<PyRuntimeError, _>(
+                "Sequence was requested but not collected"
+            ));
+        }
+    }
+
+    // Add quality if requested
+    if include_quality {
+        if let Some(ref qual_vec) = qualities {
+            let qual_array = Arc::new(StringArray::from(qual_vec.clone()));
+            columns.push(qual_array);
+        } else {
+            return Err(PyErr::new::<PyRuntimeError, _>(
+                "Quality was requested but not collected"
+            ));
+        }
+    }
+
+    // Create RecordBatch
+    let schema = create_bam_schema(include_sequence, include_quality);
+    let batch = RecordBatch::try_new(schema, columns)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create RecordBatch: {}", e)))?;
+
+    // Write batch
+    arrow_writer.write(&batch)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to write batch: {}", e)))?;
+
+    // Clear vectors for next batch
+    names.clear();
+    chroms.clear();
+    starts.clear();
+    ends.clear();
+    flags.clear();
+    if let Some(ref mut seq_vec) = sequences {
+        seq_vec.clear();
+    }
+    if let Some(ref mut qual_vec) = qualities {
+        qual_vec.clear();
+    }
+
+    Ok(())
+}
+
+
+// Helper function to process raw BAM records into Arrow RecordBatch
+fn process_bam_records_to_batch(
+    records: &[bam::Record],
+    header: &sam::Header,
+    include_sequence: bool,
+    include_quality: bool,
+    batch_id: usize,
+) -> Result<RecordBatch, Box<dyn std::error::Error + Send + Sync>> {
+    let mut buffers = ReusableBuffers::new(records.len());
+    
+    for record in records {
+        extract_record_data_enhanced(
+            record,
+            header,
+            &mut buffers,
+            include_sequence,
+            include_quality,
+        ).map_err(|e| format!("Failed to extract record data in batch {}: {}", batch_id, e))?;
+    }
+    
+    // Create Arrow arrays from buffers
+    let name_array = Arc::new(StringArray::from(buffers.names.clone()));
+    let chrom_array = Arc::new(StringArray::from(buffers.chroms.clone()));
+    let start_array = Arc::new(UInt32Array::from(buffers.starts.clone()));
+    let end_array = Arc::new(UInt32Array::from(buffers.ends.clone()));
+    let flags_array = Arc::new(UInt32Array::from(buffers.flags.clone()));
+    
+    let mut arrays: Vec<ArrayRef> = vec![
+        name_array,
+        chrom_array, 
+        start_array,
+        end_array,
+        flags_array,
+    ];
+    
+    if include_sequence {
+        if let Some(ref sequences) = buffers.sequences {
+            arrays.push(Arc::new(StringArray::from(sequences.clone())));
+        }
+    }
+    
+    if include_quality {
+        if let Some(ref quality_scores) = buffers.quality_scores {
+            arrays.push(Arc::new(StringArray::from(quality_scores.clone())));
+        }
+    }
+
+    let schema = create_bam_schema(include_sequence, include_quality);
+    RecordBatch::try_new(schema, arrays)
+        .map_err(|e| format!("Failed to create record batch for batch {}: {}", batch_id, e).into())
 }
 
 

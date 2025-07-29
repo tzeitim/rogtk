@@ -1,6 +1,6 @@
 [package]
 name = "rogtk"
-version = "0.1.14"
+version = "0.1.15"
 authors = [
   "Pedro Olivares Chauvet <pedro.olivares@mdc-berlin.de>", 
   "Pedro Olivares Chauvet <pedro.olivares@weizmann.ac.il>", 
@@ -19,6 +19,10 @@ lto = true
 strip = "symbols"
 codegen-units = 1
 
+[features]
+default = []
+htslib = ["rust-htslib"]
+
 [dependencies]
 
 #seal = "0.1.5"
@@ -35,8 +39,12 @@ chrono = "=0.4.38"
 pyo3-polars = { version = "0.17.0", features = ["derive", "dtype-struct", "dtype-decimal", "dtype-array"] }
 serde = { version = "1", features = ["derive"] }
 target-lexicon = "0.12.14"
-noodles = { version = "0.82", features = ["bam", "sam", "bgzf"] }
+noodles = { version = "0.82", features = ["bam", "sam", "bgzf", "core"] }
 regex = "1.11.1"
+rayon = "1.10.0"
+crossbeam-channel = "0.5.15"
+gzp = "0.11.3"
+rust-htslib = { version = "0.47", default-features = false, optional = true }
 
 #DBGraphs
 bio = "2.0.3"
