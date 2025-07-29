@@ -38,7 +38,9 @@ jobs:
             quay.io/pypa/manylinux2014_x86_64 \
             bash -c "
               yum update -y && 
-              yum install -y clang-devel llvm-devel &&
+              yum install -y clang-devel llvm-devel curl &&
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+              source ~/.cargo/env &&
               export LIBCLANG_PATH=/usr/lib64 &&
               /opt/python/cp310-cp310/bin/pip install maturin &&
               cd /io &&
