@@ -9,6 +9,17 @@ build-backend = "maturin"
 [project]
 name = "rogtk"
 version = "0.1.15"
+description = "Rust-based genomics toolkit - high-performance backend for ogtk"
+authors = [
+    {name = "Pedro Olivares", email = "pedroy.final@gmail.com"}
+]
+maintainers = [
+    {name = "Pedro Olivares", email = "pedroy.final@gmail.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+homepage = "https://github.com/tzeitim/rogtk"
+repository = "https://github.com/tzeitim/rogtk"
 requires-python = ">=3.10"
 dependencies = [
     "polars>=1.25,!=1.26.*"
