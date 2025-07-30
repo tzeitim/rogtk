@@ -1159,13 +1159,13 @@ pub fn bam_to_arrow_ipc_gzp_parallel(
 #[pyo3(signature = (
     bam_path, 
     arrow_ipc_path, 
-    batch_size = 50000,
+    batch_size = 20000,
     include_sequence = true,
     include_quality = true,
     bgzf_threads = 4,
-    writing_threads = 4,
-    read_buffer_mb = None,
-    write_buffer_mb = None,
+    writing_threads = 12,
+    read_buffer_mb = Some(1024),
+    write_buffer_mb = Some(256),
     limit = None
 ))]
 pub fn bam_to_arrow_ipc_htslib_parallel(
