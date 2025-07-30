@@ -21,6 +21,9 @@ try:
         bam_to_arrow_ipc_parallel,
         bam_to_arrow_ipc_gzp_parallel,
         bam_to_arrow_ipc_htslib_parallel,
+        bam_to_arrow_ipc_htslib_multi_reader_parallel,
+        bam_to_arrow_ipc_htslib_optimized,
+        bam_to_arrow_ipc_htslib_mmap_parallel,
     )
     _HTSLIB_AVAILABLE = True
 except ImportError:
@@ -40,6 +43,9 @@ except ImportError:
     )
     _HTSLIB_AVAILABLE = False
     bam_to_arrow_ipc_htslib_parallel = None
+    bam_to_arrow_ipc_htslib_multi_reader_parallel = None
+    bam_to_arrow_ipc_htslib_optimized = None
+    bam_to_arrow_ipc_htslib_mmap_parallel = None
 
 @pl.api.register_expr_namespace("dna")
 class DnaNamespace:

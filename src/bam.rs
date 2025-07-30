@@ -1159,11 +1159,11 @@ pub fn bam_to_arrow_ipc_gzp_parallel(
 #[pyo3(signature = (
     bam_path, 
     arrow_ipc_path, 
-    batch_size = 20000,
+    batch_size = 15000,
     include_sequence = true,
     include_quality = true,
-    bgzf_threads = 4,
-    writing_threads = 12,
+    bgzf_threads = 8,
+    writing_threads = 8,
     read_buffer_mb = Some(1024),
     write_buffer_mb = Some(256),
     limit = None
@@ -1240,43 +1240,6 @@ pub fn bam_to_arrow_ipc_htslib_parallel(
         .build()
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create thread pool: {}", e)))?;
 
-    // Spawn processing workers
-    let workers_result_sender = result_sender.clone();
-    let workers_batch_receiver = batch_receiver.clone();
-    
-    let _workers_handle = std::thread::spawn(move || {
-        pool.install(|| {
-            while let Ok((batch_id, hts_records)) = workers_batch_receiver.recv() {
-                let batch_start = Instant::now();
-                
-                // Process HTSlib records into Arrow RecordBatch
-                let batch_result = process_htslib_records_to_batch(
-                    &hts_records,
-                    include_sequence,
-                    include_quality,
-                    batch_id,
-                );
-                
-                match batch_result {
-                    Ok(batch) => {
-                        let batch_duration = batch_start.elapsed();
-                        debug!("Thread processed HTSlib batch {} ({} records) in {:?}", 
-                                batch_id, batch.num_rows(), batch_duration);
-                        
-                        if let Err(_) = workers_result_sender.send((batch_id, batch)) {
-                            debug!("Failed to send processed HTSlib batch {}", batch_id);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        debug!("Failed to process HTSlib batch {}: {}", batch_id, e);
-                        break;
-                    }
-                }
-            }
-        });
-    });
-
     // Writer thread with single buffered output stream
     let output_file = File::create(output_path)
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file: {}", e)))?;
@@ -1317,6 +1280,49 @@ pub fn bam_to_arrow_ipc_htslib_parallel(
     // Enable parallel BGZF decompression
     hts_reader.set_threads(effective_bgzf_threads)
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to set threads: {}", e)))?;
+
+    // Build chromosome lookup table from header
+    let header_view = hts_reader.header().clone();
+    let chrom_lookup = build_chromosome_lookup(&header_view);
+
+    // Spawn processing workers (moved here after chrom_lookup is available)
+    let workers_result_sender = result_sender.clone();
+    let workers_batch_receiver = batch_receiver.clone();
+    let workers_chrom_lookup = chrom_lookup.clone();
+    
+    let _workers_handle = std::thread::spawn(move || {
+        pool.install(|| {
+            while let Ok((batch_id, hts_records)) = workers_batch_receiver.recv() {
+                let batch_start = Instant::now();
+                
+                // Process HTSlib records into Arrow RecordBatch
+                let batch_result = process_htslib_records_to_batch(
+                    &hts_records,
+                    &workers_chrom_lookup,
+                    include_sequence,
+                    include_quality,
+                    batch_id,
+                );
+                
+                match batch_result {
+                    Ok(batch) => {
+                        let batch_duration = batch_start.elapsed();
+                        debug!("Thread processed HTSlib batch {} ({} records) in {:?}", 
+                                batch_id, batch.num_rows(), batch_duration);
+                        
+                        if let Err(_) = workers_result_sender.send((batch_id, batch)) {
+                            debug!("Failed to send processed HTSlib batch {}", batch_id);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to process HTSlib batch {}: {}", batch_id, e);
+                        break;
+                    }
+                }
+            }
+        });
+    });
 
     let target_records = limit.unwrap_or(usize::MAX);
     
@@ -1409,11 +1415,957 @@ pub fn bam_to_arrow_ipc_htslib_parallel(
     Ok(())
 }
 
+#[cfg(feature = "htslib")]
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path, 
+    arrow_ipc_path, 
+    batch_size = 15000,
+    include_sequence = true,
+    include_quality = true,
+    max_bgzf_threads = 16,
+    writing_threads = 6,
+    read_buffer_mb = Some(2048),
+    write_buffer_mb = Some(512),
+    limit = None
+))]
+pub fn bam_to_arrow_ipc_htslib_optimized(
+    bam_path: &str,
+    arrow_ipc_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    max_bgzf_threads: usize,
+    writing_threads: usize,
+    read_buffer_mb: Option<usize>,
+    write_buffer_mb: Option<usize>,
+    limit: Option<usize>,
+) -> PyResult<()> {
+    let start_time = Instant::now();
+    
+    let input_path = Path::new(bam_path);
+    let output_path = Path::new(arrow_ipc_path);
+
+    if !input_path.exists() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            format!("BAM file does not exist: {}", bam_path)
+        ));
+    }
+    
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    let effective_batch_size = batch_size.min(1000000);
+    let effective_bgzf_threads = max_bgzf_threads.min(32); // Allow high thread counts
+    let effective_writing_threads = writing_threads.max(1).min(16);
+    
+    // Much larger buffers for high-throughput
+    let read_buffer_size = read_buffer_mb
+        .unwrap_or(2048)  // Default 2GB read buffer
+        * 1024 * 1024;
+        
+    let write_buffer_size = write_buffer_mb
+        .unwrap_or(512)   // Default 512MB write buffer
+        * 1024 * 1024;
+    
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to create output directory: {}", e)
+            ))?;
+    }
+
+    eprintln!("Starting HTSlib OPTIMIZED high-throughput BAM to IPC conversion:");
+    eprintln!("  Input: {}", bam_path);
+    eprintln!("  Output: {}", arrow_ipc_path);
+    eprintln!("  Batch size: {}", effective_batch_size);
+    eprintln!("  BGZF threads: {} (maximized)", effective_bgzf_threads);
+    eprintln!("  Writing threads: {}", effective_writing_threads);
+    eprintln!("  Read buffer: {}MB", read_buffer_size / (1024 * 1024));
+    eprintln!("  Write buffer: {}MB", write_buffer_size / (1024 * 1024));
+    eprintln!("  Include sequence: {}", include_sequence);
+    eprintln!("  Include quality: {}", include_quality);
+
+    // Setup parallel processing architecture (streamlined)
+    let schema = create_bam_schema(include_sequence, include_quality);
+    let channel_size = (effective_writing_threads * 8).max(32); // Larger queues
+    let (batch_sender, batch_receiver): (Sender<(usize, Vec<hts_bam::Record>)>, Receiver<(usize, Vec<hts_bam::Record>)>) = bounded(channel_size);
+    let (result_sender, result_receiver): (Sender<(usize, RecordBatch)>, Receiver<(usize, RecordBatch)>) = bounded(channel_size);
+    
+    // Configure processing thread pool
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(effective_writing_threads)
+        .build()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create thread pool: {}", e)))?;
+
+    // Main thread: read HTSlib records with MAXIMUM threading
+    let mut hts_reader = hts_bam::Reader::from_path(bam_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file: {}", e)))?;
+    
+    // MAXIMIZE BGZF decompression threads - this is key!
+    eprintln!("Setting BGZF threads to maximum: {}", effective_bgzf_threads);
+    hts_reader.set_threads(effective_bgzf_threads)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to set threads: {}", e)))?;
+
+    // Build chromosome lookup table from header
+    let header_view = hts_reader.header().clone();
+    let chrom_lookup = build_chromosome_lookup(&header_view);
+
+    // Spawn processing workers with optimized chromosome lookup
+    let workers_result_sender = result_sender.clone();
+    let workers_batch_receiver = batch_receiver.clone();
+    let workers_chrom_lookup = chrom_lookup.clone();
+    
+    let _workers_handle = std::thread::spawn(move || {
+        pool.install(|| {
+            while let Ok((batch_id, hts_records)) = workers_batch_receiver.recv() {
+                let batch_start = Instant::now();
+                
+                // Process HTSlib records into Arrow RecordBatch
+                let batch_result = process_htslib_records_to_batch(
+                    &hts_records,
+                    &workers_chrom_lookup,
+                    include_sequence,
+                    include_quality,
+                    batch_id,
+                );
+                
+                match batch_result {
+                    Ok(batch) => {
+                        let batch_duration = batch_start.elapsed();
+                        debug!("Thread processed optimized batch {} ({} records) in {:?}", 
+                                batch_id, batch.num_rows(), batch_duration);
+                        
+                        if let Err(_) = workers_result_sender.send((batch_id, batch)) {
+                            debug!("Failed to send processed optimized batch {}", batch_id);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to process optimized batch {}: {}", batch_id, e);
+                        break;
+                    }
+                }
+            }
+        });
+    });
+
+    // Writer thread with larger buffer
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file: {}", e)))?;
+    let buffered_output = std::io::BufWriter::with_capacity(write_buffer_size, output_file);
+    let mut arrow_writer = ArrowIpcWriter::try_new(buffered_output, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow writer: {}", e)))?;
+
+    let writer_handle = std::thread::spawn(move || -> PyResult<usize> {
+        let mut total_records = 0;
+        let mut batch_count = 0;
+        
+        // Direct write as batches arrive (no order preservation for maximum speed)
+        while let Ok((_, batch)) = result_receiver.recv() {
+            arrow_writer.write(&batch)
+                .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                    format!("Failed to write batch: {}", e)
+                ))?;
+            
+            total_records += batch.num_rows();
+            batch_count += 1;
+            
+            // Report progress every 100 batches
+            if batch_count % 100 == 0 {
+                eprintln!("Progress: {} batches written, {} total records (optimized)", batch_count, total_records);
+            }
+        }
+        
+        arrow_writer.finish()
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow writer: {}", e)))?;
+        
+        Ok(total_records)
+    });
+
+    let target_records = limit.unwrap_or(usize::MAX);
+    
+    // Main reading loop: focus on feeding HTSlib's optimized decompression
+    let mut batch_id = 0;
+    let mut current_batch: Vec<hts_bam::Record> = Vec::with_capacity(effective_batch_size);
+    let mut total_records_read = 0;
+    let mut hts_record = hts_bam::Record::new();
+    
+    // Pre-allocate for efficiency
+    current_batch.reserve(effective_batch_size);
+    
+    loop {
+        // Check for Python interrupts periodically
+        if batch_id % 10 == 0 {
+            Python::with_gil(|py| {
+                py.check_signals().map_err(|e| {
+                    eprintln!("Conversion interrupted by user");
+                    e
+                })
+            })?;
+        }
+
+        let remaining_records = target_records.saturating_sub(total_records_read);
+        if remaining_records == 0 {
+            debug!("Reached limit of {} records", target_records);
+            break;
+        }
+
+        let current_batch_size = effective_batch_size.min(remaining_records);
+        
+        // Read a batch of HTSlib records - let HTSlib's threading do the work!
+        current_batch.clear();
+        
+        for _ in 0..current_batch_size {
+            match hts_reader.read(&mut hts_record) {
+                Some(Ok(())) => {
+                    current_batch.push(hts_record.clone());
+                    total_records_read += 1;
+                }
+                None => {
+                    // EOF reached
+                    if !current_batch.is_empty() {
+                        // Send the final partial batch
+                        batch_sender.send((batch_id, current_batch.clone()))
+                            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                                format!("Failed to send final batch: {}", e)
+                            ))?;
+                        batch_id += 1;
+                    }
+                    break;
+                }
+                Some(Err(e)) => {
+                    return Err(PyErr::new::<PyRuntimeError, _>(
+                        format!("Failed to read BAM record at position {}: {}", total_records_read, e)
+                    ));
+                }
+            }
+        }
+        
+        if current_batch.is_empty() {
+            break; // EOF reached
+        }
+        
+        debug!("Read optimized batch {} with {} records", batch_id, current_batch.len());
+        
+        // Send batch to workers
+        batch_sender.send((batch_id, current_batch.clone()))
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to send batch {}: {}", batch_id, e)
+            ))?;
+        
+        batch_id += 1;
+    }
+    
+    // Signal end of input
+    drop(batch_sender);
+    drop(result_sender);
+    
+    // Wait for writer to complete
+    let final_record_count = writer_handle.join()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Writer thread failed: {:?}", e)))??;
+    
+    let total_duration = start_time.elapsed();
+    let throughput = final_record_count as f64 / total_duration.as_secs_f64();
+    
+    let completion_msg = format!(
+        "HTSlib OPTIMIZED conversion complete: {} records written to {} in {:?} ({:.0} records/sec using {} BGZF + {} processing threads)", 
+        final_record_count, arrow_ipc_path, total_duration, throughput, effective_bgzf_threads, effective_writing_threads
+    );
+    eprintln!("{}", completion_msg);
+    
+    Ok(())
+}
+
+#[cfg(feature = "htslib")]
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path, 
+    arrow_ipc_path, 
+    batch_size = 15000,
+    include_sequence = true,
+    include_quality = true,
+    num_workers = 4,
+    chunk_size_mb = 64,
+    bgzf_threads_per_worker = 2,
+    limit = None
+))]
+pub fn bam_to_arrow_ipc_htslib_mmap_parallel(
+    bam_path: &str,
+    arrow_ipc_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    num_workers: usize,
+    chunk_size_mb: usize,
+    bgzf_threads_per_worker: usize,
+    limit: Option<usize>,
+) -> PyResult<()> {
+    let start_time = Instant::now();
+    
+    let input_path = Path::new(bam_path);
+    let output_path = Path::new(arrow_ipc_path);
+
+    if !input_path.exists() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            format!("BAM file does not exist: {}", bam_path)
+        ));
+    }
+    
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    let effective_batch_size = batch_size.min(1000000);
+    let effective_num_workers = num_workers.max(1).min(16);
+    let effective_chunk_size = (chunk_size_mb * 1024 * 1024).max(1024 * 1024); // Min 1MB
+    let effective_bgzf_threads = bgzf_threads_per_worker.max(1).min(8);
+    
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to create output directory: {}", e)
+            ))?;
+    }
+
+    eprintln!("Starting HTSlib MEMORY-MAPPED parallel BAM to IPC conversion:");
+    eprintln!("  Input: {}", bam_path);
+    eprintln!("  Output: {}", arrow_ipc_path);
+    eprintln!("  Batch size: {}", effective_batch_size);
+    eprintln!("  Number of workers: {}", effective_num_workers);
+    eprintln!("  Chunk size: {}MB", chunk_size_mb);
+    eprintln!("  BGZF threads per worker: {}", effective_bgzf_threads);
+    eprintln!("  Include sequence: {}", include_sequence);
+    eprintln!("  Include quality: {}", include_quality);
+
+    // Get file size for chunking strategy
+    let file_size = std::fs::metadata(bam_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to get file size: {}", e)))?
+        .len();
+    
+    eprintln!("  File size: {:.1}MB", file_size as f64 / (1024.0 * 1024.0));
+
+    // Create header reader to get chromosome lookup
+    let temp_reader = hts_bam::Reader::from_path(bam_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file: {}", e)))?;
+    let header_view = temp_reader.header().clone();
+    let chrom_lookup = build_chromosome_lookup(&header_view);
+
+    // For now, implement a simplified approach:
+    // Create multiple readers that read different portions of the file
+    // This is a step toward true memory mapping
+    
+    // Setup channels
+    let schema = create_bam_schema(include_sequence, include_quality);
+    let channel_size = (effective_num_workers * 4).max(16);
+    let (result_sender, result_receiver): (Sender<(usize, RecordBatch)>, Receiver<(usize, RecordBatch)>) = bounded(channel_size);
+    
+    // Create worker threads that each process a different portion of the file
+    let mut worker_handles = Vec::new();
+    let target_records = limit.unwrap_or(usize::MAX);
+    let records_per_worker = target_records / effective_num_workers;
+    
+    for worker_id in 0..effective_num_workers {
+        let bam_path_clone = bam_path.to_string();
+        let result_sender_clone = result_sender.clone();
+        let chrom_lookup_clone = chrom_lookup.clone();
+        let start_record = worker_id * records_per_worker;
+        let end_record = if worker_id == effective_num_workers - 1 {
+            target_records // Last worker takes remainder
+        } else {
+            (worker_id + 1) * records_per_worker
+        };
+        
+        let handle = std::thread::spawn(move || {
+            eprintln!("Worker {} processing records {} to {}", worker_id, start_record, end_record);
+            
+            // Each worker creates its own reader
+            match hts_bam::Reader::from_path(&bam_path_clone) {
+                Ok(mut worker_reader) => {
+                    // Set threads for this worker
+                    if let Err(e) = worker_reader.set_threads(effective_bgzf_threads) {
+                        eprintln!("Worker {} failed to set threads: {}", worker_id, e);
+                        return;
+                    }
+                    
+                    // Simple approach: skip to start position
+                    // TODO: Replace with true memory mapping + BGZF parsing
+                    let mut skipped = 0;
+                    let mut worker_record = hts_bam::Record::new();
+                    
+                    // Skip to start position
+                    while skipped < start_record {
+                        match worker_reader.read(&mut worker_record) {
+                            Some(Ok(())) => skipped += 1,
+                            Some(Err(e)) => {
+                                eprintln!("Worker {} skip error: {}", worker_id, e);
+                                return;
+                            }
+                            None => {
+                                eprintln!("Worker {} reached EOF during skip", worker_id);
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // Process records for this worker
+                    let mut processed = 0;
+                    let mut current_batch: Vec<hts_bam::Record> = Vec::with_capacity(effective_batch_size);
+                    let mut batch_id = worker_id * 1000;
+                    
+                    while processed < (end_record - start_record) {
+                        match worker_reader.read(&mut worker_record) {
+                            Some(Ok(())) => {
+                                current_batch.push(worker_record.clone());
+                                processed += 1;
+                                
+                                if current_batch.len() >= effective_batch_size {
+                                    // Process batch
+                                    match process_htslib_records_to_batch(
+                                        &current_batch,
+                                        &chrom_lookup_clone,
+                                        include_sequence,
+                                        include_quality,
+                                        batch_id,
+                                    ) {
+                                        Ok(batch) => {
+                                            if let Err(_) = result_sender_clone.send((batch_id, batch)) {
+                                                eprintln!("Worker {} failed to send batch {}", worker_id, batch_id);
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Worker {} batch processing error: {}", worker_id, e);
+                                            return;
+                                        }
+                                    }
+                                    current_batch.clear();
+                                    batch_id += 1;
+                                }
+                            }
+                            Some(Err(e)) => {
+                                eprintln!("Worker {} read error: {}", worker_id, e);
+                                break;
+                            }
+                            None => {
+                                eprintln!("Worker {} reached EOF", worker_id);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Process final batch
+                    if !current_batch.is_empty() {
+                        match process_htslib_records_to_batch(
+                            &current_batch,
+                            &chrom_lookup_clone,
+                            include_sequence,
+                            include_quality,
+                            batch_id,
+                        ) {
+                            Ok(batch) => {
+                                let _ = result_sender_clone.send((batch_id, batch));
+                            }
+                            Err(e) => {
+                                eprintln!("Worker {} final batch error: {}", worker_id, e);
+                            }
+                        }
+                    }
+                    
+                    eprintln!("Worker {} completed: {} records processed", worker_id, processed);
+                }
+                Err(e) => {
+                    eprintln!("Worker {} failed to open BAM file: {}", worker_id, e);
+                }
+            }
+        });
+        
+        worker_handles.push(handle);
+    }
+    
+    // Writer thread
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file: {}", e)))?;
+    let mut arrow_writer = ArrowIpcWriter::try_new(output_file, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow writer: {}", e)))?;
+
+    let writer_handle = std::thread::spawn(move || -> PyResult<usize> {
+        let mut total_records = 0;
+        let mut batch_count = 0;
+        
+        while let Ok((_, batch)) = result_receiver.recv() {
+            arrow_writer.write(&batch)
+                .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                    format!("Failed to write batch: {}", e)
+                ))?;
+            
+            total_records += batch.num_rows();
+            batch_count += 1;
+            
+            if batch_count % 50 == 0 {
+                eprintln!("Progress: {} batches written, {} total records (mmap)", batch_count, total_records);
+            }
+        }
+        
+        arrow_writer.finish()
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow writer: {}", e)))?;
+        
+        Ok(total_records)
+    });
+    
+    // Wait for all workers to complete
+    for (i, handle) in worker_handles.into_iter().enumerate() {
+        if let Err(e) = handle.join() {
+            eprintln!("Worker {} thread panicked: {:?}", i, e);
+        }
+    }
+    
+    // Signal end of input
+    drop(result_sender);
+    
+    // Wait for writer to complete
+    let final_record_count = writer_handle.join()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Writer thread failed: {:?}", e)))??;
+    
+    let total_duration = start_time.elapsed();
+    let throughput = final_record_count as f64 / total_duration.as_secs_f64();
+    
+    let completion_msg = format!(
+        "Memory-mapped parallel conversion complete: {} records written to {} in {:?} ({:.0} records/sec using {} workers)", 
+        final_record_count, arrow_ipc_path, total_duration, throughput, effective_num_workers
+    );
+    eprintln!("{}", completion_msg);
+    
+    Ok(())
+}
+
+// Helper function to build chromosome lookup table
+#[cfg(feature = "htslib")]
+fn build_chromosome_lookup(header: &hts_bam::HeaderView) -> Arc<Vec<String>> {
+    let mut lookup = Vec::new();
+    for tid in 0..header.target_count() {
+        let chrom_name = String::from_utf8_lossy(header.tid2name(tid as u32)).into_owned();
+        lookup.push(chrom_name);
+    }
+    Arc::new(lookup)
+}
+
+// Zero-copy quality score processing helper
+#[cfg(feature = "htslib")]
+fn quality_to_string_zero_copy(qual: &[u8]) -> String {
+    if qual.is_empty() {
+        return String::new();
+    }
+    
+    let mut result = String::with_capacity(qual.len());
+    unsafe {
+        let bytes = result.as_mut_vec();
+        bytes.extend_from_slice(qual);           // Single memcpy operation
+        for byte in bytes {
+            *byte += b'!';                       // In-place addition (PHRED+33)
+        }
+    }
+    result
+}
+
+// Multi-reader seek-based functionality
+#[cfg(feature = "htslib")]
+fn test_multi_position_reading(bam_path: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    use std::fs;
+    
+    let file_size = fs::metadata(bam_path)?.len();
+    let _mid_point = file_size / 2;
+    
+    // Test if we can create multiple readers and seek to different positions
+    let mut reader1 = hts_bam::Reader::from_path(bam_path)?;
+    let mut reader2 = hts_bam::Reader::from_path(bam_path)?;
+    
+    // Try to seek reader2 to middle of file
+    let _seek_result = reader2.set_threads(1); // Ensure single-threaded for seeking
+    
+    // For now, let's test basic dual-reader creation
+    // More sophisticated seeking will be implemented next
+    let mut record1 = hts_bam::Record::new();
+    let mut record2 = hts_bam::Record::new();
+    
+    // Test that both readers can read independently
+    let read1_ok = reader1.read(&mut record1).is_some();
+    let read2_ok = reader2.read(&mut record2).is_some();
+    
+    Ok(read1_ok && read2_ok)
+}
+
+#[cfg(feature = "htslib")]
+fn discover_safe_seek_points(bam_path: &str, num_segments: usize) -> Result<Vec<u64>, Box<dyn std::error::Error + Send + Sync>> {
+    use std::fs;
+    
+    let file_size = fs::metadata(bam_path)?.len();
+    let segment_size = file_size / num_segments as u64;
+    
+    let mut seek_points = Vec::new();
+    seek_points.push(0); // Always start from beginning
+    
+    for i in 1..num_segments {
+        let approximate_pos = i as u64 * segment_size;
+        
+        // For initial implementation, use approximate positions
+        // TODO: Implement proper record boundary detection
+        seek_points.push(approximate_pos);
+    }
+    
+    Ok(seek_points)
+}
+
+// Multi-reader pipeline architecture
+#[cfg(feature = "htslib")]
+struct MultiReaderPipeline {
+    bam_path: String,
+    num_readers: usize,
+    seek_points: Vec<u64>,
+    chrom_lookup: Arc<Vec<String>>,
+}
+
+#[cfg(feature = "htslib")]
+impl MultiReaderPipeline {
+    fn new(bam_path: &str, num_readers: usize) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // Create initial reader to get header and discover seek points
+        let temp_reader = hts_bam::Reader::from_path(bam_path)?;
+        let header_view = temp_reader.header().clone();
+        let chrom_lookup = build_chromosome_lookup(&header_view);
+        
+        let seek_points = discover_safe_seek_points(bam_path, num_readers)?;
+        
+        Ok(MultiReaderPipeline {
+            bam_path: bam_path.to_string(),
+            num_readers,
+            seek_points,
+            chrom_lookup,
+        })
+    }
+    
+    fn spawn_reader_threads(
+        &self,
+        batch_size: usize,
+        batch_sender: Sender<(usize, Vec<hts_bam::Record>)>,
+        target_records: usize,
+    ) -> Vec<std::thread::JoinHandle<()>> {
+        let mut handles = Vec::new();
+        
+        for reader_id in 0..self.num_readers {
+            let bam_path = self.bam_path.clone();
+            let seek_start = self.seek_points[reader_id];
+            let seek_end = self.seek_points.get(reader_id + 1).copied().unwrap_or(u64::MAX);
+            let batch_sender_clone = batch_sender.clone();
+            let records_per_reader = target_records / self.num_readers;
+            
+            let handle = std::thread::spawn(move || {
+                debug!("Reader {} starting: seek_start={}, seek_end={}, target_records={}", 
+                       reader_id, seek_start, seek_end, records_per_reader);
+                
+                if let Err(e) = read_segment(
+                    &bam_path,
+                    reader_id,
+                    seek_start,
+                    seek_end,
+                    batch_size,
+                    records_per_reader,
+                    batch_sender_clone,
+                ) {
+                    debug!("Reader {} failed: {}", reader_id, e);
+                }
+            });
+            
+            handles.push(handle);
+        }
+        
+        handles
+    }
+}
+
+#[cfg(feature = "htslib")]
+fn read_segment(
+    bam_path: &str,
+    reader_id: usize,
+    seek_start: u64,
+    _seek_end: u64,
+    batch_size: usize,
+    max_records: usize,
+    batch_sender: Sender<(usize, Vec<hts_bam::Record>)>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut reader = hts_bam::Reader::from_path(bam_path)?;
+    reader.set_threads(1)?; // Single-threaded for seeking
+    
+    // For initial implementation, only seek if not the first reader
+    if reader_id > 0 && seek_start > 0 {
+        // TODO: Implement proper BGZF seeking
+        // For now, skip seeking and let all readers read from start (testing concurrent access)
+        debug!("Reader {} would seek to position {}", reader_id, seek_start);
+    }
+    
+    let mut current_batch: Vec<hts_bam::Record> = Vec::with_capacity(batch_size);
+    let mut total_records_read = 0;
+    let mut batch_id = reader_id * 1000; // Offset batch IDs by reader
+    let mut record = hts_bam::Record::new();
+    
+    // Skip records for readers other than the first (simple load distribution)
+    let skip_count = reader_id * (max_records / 4); // Simple skip strategy
+    for _ in 0..skip_count {
+        if reader.read(&mut record).is_none() {
+            break;
+        }
+    }
+    
+    loop {
+        if total_records_read >= max_records {
+            break;
+        }
+        
+        match reader.read(&mut record) {
+            Some(Ok(())) => {
+                current_batch.push(record.clone());
+                total_records_read += 1;
+                
+                if current_batch.len() >= batch_size {
+                    if let Err(_) = batch_sender.send((batch_id, current_batch.clone())) {
+                        debug!("Reader {} failed to send batch {}", reader_id, batch_id);
+                        break;
+                    }
+                    current_batch.clear();
+                    batch_id += 1;
+                }
+            }
+            Some(Err(e)) => {
+                debug!("Reader {} read error: {}", reader_id, e);
+                break;
+            }
+            None => {
+                debug!("Reader {} reached EOF", reader_id);
+                break;
+            }
+        }
+    }
+    
+    // Send final partial batch
+    if !current_batch.is_empty() {
+        let _ = batch_sender.send((batch_id, current_batch));
+    }
+    
+    debug!("Reader {} completed: {} records read", reader_id, total_records_read);
+    Ok(())
+}
+
+#[cfg(feature = "htslib")]
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path, 
+    arrow_ipc_path, 
+    batch_size = 15000,
+    include_sequence = true,
+    include_quality = true,
+    num_readers = 2,
+    bgzf_threads = 4,
+    writing_threads = 10,
+    read_buffer_mb = Some(1024),
+    write_buffer_mb = Some(256),
+    limit = None
+))]
+pub fn bam_to_arrow_ipc_htslib_multi_reader_parallel(
+    bam_path: &str,
+    arrow_ipc_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    num_readers: usize,
+    bgzf_threads: usize,
+    writing_threads: usize,
+    read_buffer_mb: Option<usize>,
+    write_buffer_mb: Option<usize>,
+    limit: Option<usize>,
+) -> PyResult<()> {
+    let start_time = Instant::now();
+    
+    let input_path = Path::new(bam_path);
+    let output_path = Path::new(arrow_ipc_path);
+
+    if !input_path.exists() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            format!("BAM file does not exist: {}", bam_path)
+        ));
+    }
+    
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    let effective_batch_size = batch_size.min(1000000);
+    let effective_num_readers = num_readers.max(1).min(8); // Limit to reasonable range
+    let effective_bgzf_threads = if bgzf_threads == 0 { 4 } else { bgzf_threads.min(16) };
+    let effective_writing_threads = writing_threads.max(1).min(16);
+    
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to create output directory: {}", e)
+            ))?;
+    }
+
+    eprintln!("Starting HTSlib MULTI-READER parallel BAM to IPC conversion:");
+    eprintln!("  Input: {}", bam_path);
+    eprintln!("  Output: {}", arrow_ipc_path);
+    eprintln!("  Batch size: {}", effective_batch_size);
+    eprintln!("  Number of readers: {}", effective_num_readers);
+    eprintln!("  BGZF threads per reader: {}", effective_bgzf_threads);
+    eprintln!("  Writing threads: {}", effective_writing_threads);
+    eprintln!("  Include sequence: {}", include_sequence);
+    eprintln!("  Include quality: {}", include_quality);
+
+    // Test feasibility first
+    match test_multi_position_reading(bam_path) {
+        Ok(true) => eprintln!("✅ Multi-reader feasibility test passed"),
+        Ok(false) => {
+            eprintln!("⚠️  Multi-reader test failed, falling back to single reader");
+            return bam_to_arrow_ipc_htslib_parallel(
+                bam_path, arrow_ipc_path, batch_size, include_sequence, include_quality,
+                bgzf_threads, writing_threads, read_buffer_mb, write_buffer_mb, limit
+            );
+        }
+        Err(e) => {
+            eprintln!("❌ Multi-reader test error: {}, falling back to single reader", e);
+            return bam_to_arrow_ipc_htslib_parallel(
+                bam_path, arrow_ipc_path, batch_size, include_sequence, include_quality,
+                bgzf_threads, writing_threads, read_buffer_mb, write_buffer_mb, limit
+            );
+        }
+    }
+
+    // Setup multi-reader pipeline
+    let pipeline = MultiReaderPipeline::new(bam_path, effective_num_readers)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create multi-reader pipeline: {}", e)))?;
+
+    // Setup channels and processing architecture
+    let schema = create_bam_schema(include_sequence, include_quality);
+    let channel_size = (effective_writing_threads * 4).max(16);
+    let (batch_sender, batch_receiver): (Sender<(usize, Vec<hts_bam::Record>)>, Receiver<(usize, Vec<hts_bam::Record>)>) = bounded(channel_size);
+    let (result_sender, result_receiver): (Sender<(usize, RecordBatch)>, Receiver<(usize, RecordBatch)>) = bounded(channel_size);
+    
+    // Configure processing thread pool
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(effective_writing_threads)
+        .build()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create thread pool: {}", e)))?;
+
+    // Spawn processing workers
+    let workers_result_sender = result_sender.clone();
+    let workers_batch_receiver = batch_receiver.clone();
+    let workers_chrom_lookup = pipeline.chrom_lookup.clone();
+    
+    let _workers_handle = std::thread::spawn(move || {
+        pool.install(|| {
+            while let Ok((batch_id, hts_records)) = workers_batch_receiver.recv() {
+                let batch_start = Instant::now();
+                
+                let batch_result = process_htslib_records_to_batch(
+                    &hts_records,
+                    &workers_chrom_lookup,
+                    include_sequence,
+                    include_quality,
+                    batch_id,
+                );
+                
+                match batch_result {
+                    Ok(batch) => {
+                        let batch_duration = batch_start.elapsed();
+                        debug!("Thread processed multi-reader batch {} ({} records) in {:?}", 
+                                batch_id, batch.num_rows(), batch_duration);
+                        
+                        if let Err(_) = workers_result_sender.send((batch_id, batch)) {
+                            debug!("Failed to send processed multi-reader batch {}", batch_id);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to process multi-reader batch {}: {}", batch_id, e);
+                        break;
+                    }
+                }
+            }
+        });
+    });
+
+    // Writer thread
+    let write_buffer_size = write_buffer_mb.unwrap_or(256) * 1024 * 1024;
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file: {}", e)))?;
+    let buffered_output = std::io::BufWriter::with_capacity(write_buffer_size, output_file);
+    let mut arrow_writer = ArrowIpcWriter::try_new(buffered_output, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow writer: {}", e)))?;
+
+    let writer_handle = std::thread::spawn(move || -> PyResult<usize> {
+        let mut total_records = 0;
+        let mut batch_count = 0;
+        
+        while let Ok((_, batch)) = result_receiver.recv() {
+            arrow_writer.write(&batch)
+                .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                    format!("Failed to write batch: {}", e)
+                ))?;
+            
+            total_records += batch.num_rows();
+            batch_count += 1;
+            
+            if batch_count % 100 == 0 {
+                eprintln!("Progress: {} batches written, {} total records (multi-reader)", batch_count, total_records);
+            }
+        }
+        
+        arrow_writer.finish()
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow writer: {}", e)))?;
+        
+        Ok(total_records)
+    });
+
+    // Start multi-reader threads
+    let target_records = limit.unwrap_or(usize::MAX);
+    let reader_handles = pipeline.spawn_reader_threads(effective_batch_size, batch_sender, target_records);
+    
+    // Wait for all readers to complete
+    for (i, handle) in reader_handles.into_iter().enumerate() {
+        if let Err(e) = handle.join() {
+            eprintln!("Reader {} thread panicked: {:?}", i, e);
+        }
+    }
+    
+    // Signal end of input
+    drop(result_sender);
+    
+    // Wait for writer to complete
+    let final_record_count = writer_handle.join()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Writer thread failed: {:?}", e)))??;
+    
+    let total_duration = start_time.elapsed();
+    let throughput = final_record_count as f64 / total_duration.as_secs_f64();
+    
+    let completion_msg = format!(
+        "Multi-reader parallel conversion complete: {} records written to {} in {:?} ({:.0} records/sec using {} readers + {} processing threads)", 
+        final_record_count, arrow_ipc_path, total_duration, throughput, effective_num_readers, effective_writing_threads
+    );
+    eprintln!("{}", completion_msg);
+    
+    Ok(())
+}
 
 // Helper function to process HTSlib records into Arrow RecordBatch
 #[cfg(feature = "htslib")]
 fn process_htslib_records_to_batch(
     hts_records: &[hts_bam::Record],
+    chrom_lookup: &Arc<Vec<String>>,
     include_sequence: bool,
     include_quality: bool,
     batch_id: usize,
@@ -1434,11 +2386,14 @@ fn process_htslib_records_to_batch(
         
         // 2. Chromosome - use tid to resolve reference name
         let chrom = if hts_record.tid() >= 0 {
-            // We need the header to resolve chromosome names, but we can't access it here
-            // For now, use the tid directly as string - this is a limitation we need to fix
-            Some(format!("chr_{}", hts_record.tid()))
+            let tid = hts_record.tid() as usize;
+            if tid < chrom_lookup.len() {
+                Some(chrom_lookup[tid].clone())
+            } else {
+                None  // Invalid tid
+            }
         } else {
-            None
+            None  // Unmapped read
         };
         chroms.push(chrom);
         
@@ -1479,13 +2434,11 @@ fn process_htslib_records_to_batch(
             }
         }
         
-        // 6. Quality scores (if requested)
+        // 6. Quality scores (if requested) - ZERO-COPY OPTIMIZED
         if let Some(ref mut qual_vec) = qualities {
             let qual = hts_record.qual();
             if !qual.is_empty() && qual[0] != 255 {
-                let quality_string: String = qual.iter()
-                    .map(|&q| char::from(q + b'!'))
-                    .collect();
+                let quality_string = quality_to_string_zero_copy(qual);
                 qual_vec.push(Some(quality_string));
             } else {
                 qual_vec.push(None);

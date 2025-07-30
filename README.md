@@ -7,6 +7,8 @@ rust ogtk
 pip install -e src/rogtk/
 # or
 maturin develop
+# HTSLIB support
+LIBCLANG_PATH=$CONDA_PREFIX/lib maturin develop --features htslib --release
 ```
 
 **With HTSlib support (for parallel BAM processing):**
