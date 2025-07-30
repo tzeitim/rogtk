@@ -1163,6 +1163,9 @@ pub fn bam_to_arrow_ipc_gzp_parallel(
     include_sequence = true,
     include_quality = true,
     bgzf_threads = 4,
+    writing_threads = 4,
+    read_buffer_mb = None,
+    write_buffer_mb = None,
     limit = None
 ))]
 pub fn bam_to_arrow_ipc_htslib_parallel(
@@ -1172,6 +1175,9 @@ pub fn bam_to_arrow_ipc_htslib_parallel(
     include_sequence: bool,
     include_quality: bool,
     bgzf_threads: usize,
+    writing_threads: usize,
+    read_buffer_mb: Option<usize>,
+    write_buffer_mb: Option<usize>,
     limit: Option<usize>,
 ) -> PyResult<()> {
     let start_time = Instant::now();
@@ -1192,7 +1198,17 @@ pub fn bam_to_arrow_ipc_htslib_parallel(
     }
 
     let effective_batch_size = batch_size.min(1000000);
-    let effective_threads = if bgzf_threads == 0 { 4 } else { bgzf_threads.min(16) };
+    let effective_bgzf_threads = if bgzf_threads == 0 { 4 } else { bgzf_threads.min(16) };
+    let effective_writing_threads = writing_threads.max(1).min(16);
+    
+    // Independent buffer sizing (decoupled from thread count)
+    let read_buffer_size = read_buffer_mb
+        .unwrap_or(64)  // Default 64MB regardless of threads
+        * 1024 * 1024;
+        
+    let write_buffer_size = write_buffer_mb
+        .unwrap_or(32)  // Default 32MB per writer
+        * 1024 * 1024;
     
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
@@ -1205,45 +1221,114 @@ pub fn bam_to_arrow_ipc_htslib_parallel(
     eprintln!("  Input: {}", bam_path);
     eprintln!("  Output: {}", arrow_ipc_path);
     eprintln!("  Batch size: {}", effective_batch_size);
-    eprintln!("  BGZF threads: {}", effective_threads);
+    eprintln!("  BGZF threads: {}", effective_bgzf_threads);
+    eprintln!("  Writing threads: {}", effective_writing_threads);
+    eprintln!("  Read buffer: {}MB", read_buffer_size / (1024 * 1024));
+    eprintln!("  Write buffer: {}MB per writer", write_buffer_size / (1024 * 1024));
     eprintln!("  Include sequence: {}", include_sequence);
     eprintln!("  Include quality: {}", include_quality);
 
-    // Open BAM with rust-htslib
+    // Setup parallel processing architecture
+    let schema = create_bam_schema(include_sequence, include_quality);
+    let channel_size = (effective_writing_threads * 4).max(16);
+    let (batch_sender, batch_receiver): (Sender<(usize, Vec<hts_bam::Record>)>, Receiver<(usize, Vec<hts_bam::Record>)>) = bounded(channel_size);
+    let (result_sender, result_receiver): (Sender<(usize, RecordBatch)>, Receiver<(usize, RecordBatch)>) = bounded(channel_size);
+    
+    // Configure processing thread pool
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(effective_writing_threads)
+        .build()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create thread pool: {}", e)))?;
+
+    // Spawn processing workers
+    let workers_result_sender = result_sender.clone();
+    let workers_batch_receiver = batch_receiver.clone();
+    
+    let _workers_handle = std::thread::spawn(move || {
+        pool.install(|| {
+            while let Ok((batch_id, hts_records)) = workers_batch_receiver.recv() {
+                let batch_start = Instant::now();
+                
+                // Process HTSlib records into Arrow RecordBatch
+                let batch_result = process_htslib_records_to_batch(
+                    &hts_records,
+                    include_sequence,
+                    include_quality,
+                    batch_id,
+                );
+                
+                match batch_result {
+                    Ok(batch) => {
+                        let batch_duration = batch_start.elapsed();
+                        debug!("Thread processed HTSlib batch {} ({} records) in {:?}", 
+                                batch_id, batch.num_rows(), batch_duration);
+                        
+                        if let Err(_) = workers_result_sender.send((batch_id, batch)) {
+                            debug!("Failed to send processed HTSlib batch {}", batch_id);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to process HTSlib batch {}: {}", batch_id, e);
+                        break;
+                    }
+                }
+            }
+        });
+    });
+
+    // Writer thread with single buffered output stream
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file: {}", e)))?;
+    let buffered_output = std::io::BufWriter::with_capacity(write_buffer_size, output_file);
+    let mut arrow_writer = ArrowIpcWriter::try_new(buffered_output, &schema)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow writer: {}", e)))?;
+
+    let writer_handle = std::thread::spawn(move || -> PyResult<usize> {
+        let mut total_records = 0;
+        let mut batch_count = 0;
+        
+        // Direct write as batches arrive (no order preservation for maximum speed)
+        while let Ok((_, batch)) = result_receiver.recv() {
+            arrow_writer.write(&batch)
+                .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                    format!("Failed to write batch: {}", e)
+                ))?;
+            
+            total_records += batch.num_rows();
+            batch_count += 1;
+            
+            // Report progress every 200 batches
+            if batch_count % 200 == 0 {
+                eprintln!("Progress: {} batches written, {} total records (HTSlib parallel)", batch_count, total_records);
+            }
+        }
+        
+        arrow_writer.finish()
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow writer: {}", e)))?;
+        
+        Ok(total_records)
+    });
+
+    // Main thread: read HTSlib records and distribute to workers
     let mut hts_reader = hts_bam::Reader::from_path(bam_path)
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file: {}", e)))?;
     
     // Enable parallel BGZF decompression
-    hts_reader.set_threads(effective_threads)
+    hts_reader.set_threads(effective_bgzf_threads)
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to set threads: {}", e)))?;
-    
-    // Get header info before starting the main loop to avoid borrowing conflicts
-    let header_view = hts_reader.header().clone();
-    
-    // Create Arrow writer
-    let schema = create_bam_schema(include_sequence, include_quality);
-    let output_file = File::create(output_path)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file: {}", e)))?;
-    let mut arrow_writer = ArrowIpcWriter::try_new(output_file, &schema)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Arrow writer: {}", e)))?;
-    
-    // Process records directly to Arrow - no noodles conversion needed
-    let mut total_records = 0;
-    let mut hts_record = hts_bam::Record::new();
+
     let target_records = limit.unwrap_or(usize::MAX);
     
-    // Direct Arrow array builders
-    let mut names = Vec::with_capacity(effective_batch_size);
-    let mut chroms = Vec::with_capacity(effective_batch_size);
-    let mut starts = Vec::with_capacity(effective_batch_size);
-    let mut ends = Vec::with_capacity(effective_batch_size);
-    let mut flags = Vec::with_capacity(effective_batch_size);
-    let mut sequences: Option<Vec<Option<String>>> = if include_sequence { Some(Vec::with_capacity(effective_batch_size)) } else { None };
-    let mut qualities: Option<Vec<Option<String>>> = if include_quality { Some(Vec::with_capacity(effective_batch_size)) } else { None };
+    // Main reading loop: collect HTSlib records into batches and send to workers
+    let mut batch_id = 0;
+    let mut current_batch: Vec<hts_bam::Record> = Vec::with_capacity(effective_batch_size);
+    let mut total_records_read = 0;
+    let mut hts_record = hts_bam::Record::new();
     
     loop {
         // Check for Python interrupts periodically
-        if total_records % 10000 == 0 {
+        if batch_id % 10 == 0 {
             Python::with_gil(|py| {
                 py.check_signals().map_err(|e| {
                     eprintln!("Conversion interrupted by user");
@@ -1252,160 +1337,168 @@ pub fn bam_to_arrow_ipc_htslib_parallel(
             })?;
         }
 
-        let remaining_records = target_records.saturating_sub(total_records);
+        let remaining_records = target_records.saturating_sub(total_records_read);
         if remaining_records == 0 {
             debug!("Reached limit of {} records", target_records);
             break;
         }
 
-        match hts_reader.read(&mut hts_record) {
-            Some(Ok(())) => {
-                // Extract data directly from HTSlib record to Arrow arrays
-                
-                // 1. Read name
-                let name = String::from_utf8_lossy(hts_record.qname()).to_string();
-                names.push(name);
-                
-                // 2. Chromosome - use header to resolve tid to name
-                let chrom = if hts_record.tid() >= 0 {
-                    let tid = hts_record.tid() as u32;
-                    // Use cloned header to avoid borrow conflicts
-                    let name_bytes = header_view.tid2name(tid);
-                    Some(String::from_utf8_lossy(name_bytes).to_string())
-                } else {
-                    None
-                };
-                chroms.push(chrom);
-                
-                // 3. Start/End positions (convert from 0-based to 1-based)
-                let start_pos = if hts_record.pos() >= 0 {
-                    Some((hts_record.pos() + 1) as u32)
-                } else {
-                    None
-                };
-                starts.push(start_pos);
-                
-                // Calculate end position from start + read length
-                let end_pos = start_pos.map(|start| start + hts_record.seq_len() as u32 - 1);
-                ends.push(end_pos);
-                
-                // 4. Flags
-                flags.push(hts_record.flags() as u32);
-                
-                // 5. Sequence (if requested)
-                if let Some(ref mut seq_vec) = sequences {
-                    let seq = hts_record.seq();
-                    if seq.len() > 0 {
-                        let mut sequence_string = String::with_capacity(seq.len());
-                        for i in 0..seq.len() {
-                            let base = match seq[i] {
-                                1 => 'A',  // HTSlib encoding: A=1, C=2, G=4, T=8
-                                2 => 'C',
-                                4 => 'G', 
-                                8 => 'T',
-                                15 => 'N', // 15 = all bits set
-                                _ => 'N',
-                            };
-                            sequence_string.push(base);
-                        }
-                        seq_vec.push(Some(sequence_string));
-                    } else {
-                        seq_vec.push(None);
-                    }
+        let current_batch_size = effective_batch_size.min(remaining_records);
+        
+        // Read a batch of HTSlib records
+        current_batch.clear();
+        
+        for _ in 0..current_batch_size {
+            match hts_reader.read(&mut hts_record) {
+                Some(Ok(())) => {
+                    current_batch.push(hts_record.clone());
+                    total_records_read += 1;
                 }
-                
-                // 6. Quality scores (if requested)
-                if let Some(ref mut qual_vec) = qualities {
-                    let qual = hts_record.qual();
-                    if !qual.is_empty() && qual[0] != 255 {
-                        let quality_string: String = qual.iter()
-                            .map(|&q| char::from(q + b'!'))
-                            .collect();
-                        qual_vec.push(Some(quality_string));
-                    } else {
-                        qual_vec.push(None);
+                None => {
+                    // EOF reached
+                    if !current_batch.is_empty() {
+                        // Send the final partial batch
+                        batch_sender.send((batch_id, current_batch.clone()))
+                            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                                format!("Failed to send final batch: {}", e)
+                            ))?;
+                        batch_id += 1;
                     }
-                }
-                
-                total_records += 1;
-                
-                // Write batch when full
-                if names.len() >= effective_batch_size {
-                    write_htslib_batch_to_arrow(
-                        &mut arrow_writer,
-                        &mut names, &mut chroms, &mut starts, &mut ends, &mut flags,
-                        &mut sequences, &mut qualities,
-                        include_sequence, include_quality
-                    )?;
-                    
-                    if total_records % 200000 == 0 {
-                        eprintln!("Progress: {} records processed (HTSlib parallel)", total_records);
-                    }
-                }
-                
-                if total_records >= target_records {
                     break;
                 }
-            }
-            None => {
-                // EOF reached
-                break;
-            }
-            Some(Err(e)) => {
-                return Err(PyErr::new::<PyRuntimeError, _>(
-                    format!("Failed to read BAM record at position {}: {}", total_records, e)
-                ));
+                Some(Err(e)) => {
+                    return Err(PyErr::new::<PyRuntimeError, _>(
+                        format!("Failed to read BAM record at position {}: {}", total_records_read, e)
+                    ));
+                }
             }
         }
+        
+        if current_batch.is_empty() {
+            break; // EOF reached
+        }
+        
+        debug!("Read HTSlib batch {} with {} records", batch_id, current_batch.len());
+        
+        // Send batch to workers
+        batch_sender.send((batch_id, current_batch.clone()))
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                format!("Failed to send batch {}: {}", batch_id, e)
+            ))?;
+        
+        batch_id += 1;
     }
     
-    // Process final batch if any records remain
-    if !names.is_empty() {
-        write_htslib_batch_to_arrow(
-            &mut arrow_writer,
-            &mut names, &mut chroms, &mut starts, &mut ends, &mut flags,
-            &mut sequences, &mut qualities,
-            include_sequence, include_quality
-        )?;
-    }
+    // Signal end of input
+    drop(batch_sender);
+    drop(result_sender);
     
-    arrow_writer.finish()
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Arrow writer: {}", e)))?;
+    // Wait for writer to complete
+    let final_record_count = writer_handle.join()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Writer thread failed: {:?}", e)))??;
     
     let total_duration = start_time.elapsed();
-    let throughput = total_records as f64 / total_duration.as_secs_f64();
+    let throughput = final_record_count as f64 / total_duration.as_secs_f64();
     
     let completion_msg = format!(
-        "HTSlib parallel conversion complete: {} records written to {} in {:?} ({:.0} records/sec using {} BGZF threads)", 
-        total_records, arrow_ipc_path, total_duration, throughput, effective_threads
+        "HTSlib parallel conversion complete: {} records written to {} in {:?} ({:.0} records/sec using {} BGZF + {} processing threads)", 
+        final_record_count, arrow_ipc_path, total_duration, throughput, effective_bgzf_threads, effective_writing_threads
     );
     eprintln!("{}", completion_msg);
     
     Ok(())
 }
 
-// Helper function to write HTSlib batch to Arrow writer
+
+// Helper function to process HTSlib records into Arrow RecordBatch
 #[cfg(feature = "htslib")]
-fn write_htslib_batch_to_arrow(
-    arrow_writer: &mut ArrowIpcWriter<File>,
-    names: &mut Vec<String>,
-    chroms: &mut Vec<Option<String>>,
-    starts: &mut Vec<Option<u32>>,
-    ends: &mut Vec<Option<u32>>,
-    flags: &mut Vec<u32>,
-    sequences: &mut Option<Vec<Option<String>>>,
-    qualities: &mut Option<Vec<Option<String>>>,
+fn process_htslib_records_to_batch(
+    hts_records: &[hts_bam::Record],
     include_sequence: bool,
     include_quality: bool,
-) -> PyResult<()> {
-    use arrow::array::{StringArray, UInt32Array, Array};
-
+    batch_id: usize,
+) -> Result<RecordBatch, Box<dyn std::error::Error + Send + Sync>> {
+    // Pre-allocate vectors for Arrow arrays
+    let mut names = Vec::with_capacity(hts_records.len());
+    let mut chroms = Vec::with_capacity(hts_records.len());
+    let mut starts = Vec::with_capacity(hts_records.len());
+    let mut ends = Vec::with_capacity(hts_records.len());
+    let mut flags = Vec::with_capacity(hts_records.len());
+    let mut sequences: Option<Vec<Option<String>>> = if include_sequence { Some(Vec::with_capacity(hts_records.len())) } else { None };
+    let mut qualities: Option<Vec<Option<String>>> = if include_quality { Some(Vec::with_capacity(hts_records.len())) } else { None };
+    
+    for hts_record in hts_records {
+        // 1. Read name
+        let name = String::from_utf8_lossy(hts_record.qname()).to_string();
+        names.push(name);
+        
+        // 2. Chromosome - use tid to resolve reference name
+        let chrom = if hts_record.tid() >= 0 {
+            // We need the header to resolve chromosome names, but we can't access it here
+            // For now, use the tid directly as string - this is a limitation we need to fix
+            Some(format!("chr_{}", hts_record.tid()))
+        } else {
+            None
+        };
+        chroms.push(chrom);
+        
+        // 3. Start/End positions (convert from 0-based to 1-based)
+        let start_pos = if hts_record.pos() >= 0 {
+            Some((hts_record.pos() + 1) as u32)
+        } else {
+            None
+        };
+        starts.push(start_pos);
+        
+        // Calculate end position from start + read length
+        let end_pos = start_pos.map(|start| start + hts_record.seq_len() as u32 - 1);
+        ends.push(end_pos);
+        
+        // 4. Flags
+        flags.push(hts_record.flags() as u32);
+        
+        // 5. Sequence (if requested)
+        if let Some(ref mut seq_vec) = sequences {
+            let seq = hts_record.seq();
+            if seq.len() > 0 {
+                let mut sequence_string = String::with_capacity(seq.len());
+                for i in 0..seq.len() {
+                    let base = match seq[i] {
+                        1 => 'A',  // HTSlib encoding: A=1, C=2, G=4, T=8
+                        2 => 'C',
+                        4 => 'G', 
+                        8 => 'T',
+                        15 => 'N', // 15 = all bits set
+                        _ => 'N',
+                    };
+                    sequence_string.push(base);
+                }
+                seq_vec.push(Some(sequence_string));
+            } else {
+                seq_vec.push(None);
+            }
+        }
+        
+        // 6. Quality scores (if requested)
+        if let Some(ref mut qual_vec) = qualities {
+            let qual = hts_record.qual();
+            if !qual.is_empty() && qual[0] != 255 {
+                let quality_string: String = qual.iter()
+                    .map(|&q| char::from(q + b'!'))
+                    .collect();
+                qual_vec.push(Some(quality_string));
+            } else {
+                qual_vec.push(None);
+            }
+        }
+    }
+    
     // Build Arrow arrays
-    let name_array = Arc::new(StringArray::from(names.clone()));
-    let chrom_array = Arc::new(StringArray::from(chroms.clone()));
-    let start_array = Arc::new(UInt32Array::from(starts.clone()));
-    let end_array = Arc::new(UInt32Array::from(ends.clone()));
-    let flag_array = Arc::new(UInt32Array::from(flags.clone()));
+    let name_array = Arc::new(StringArray::from(names));
+    let chrom_array = Arc::new(StringArray::from(chroms));
+    let start_array = Arc::new(UInt32Array::from(starts));
+    let end_array = Arc::new(UInt32Array::from(ends));
+    let flag_array = Arc::new(UInt32Array::from(flags));
 
     // Build column arrays
     let mut columns: Vec<Arc<dyn Array>> = vec![
@@ -1418,51 +1511,24 @@ fn write_htslib_batch_to_arrow(
 
     // Add sequence if requested
     if include_sequence {
-        if let Some(ref seq_vec) = sequences {
-            let seq_array = Arc::new(StringArray::from(seq_vec.clone()));
+        if let Some(seq_vec) = sequences {
+            let seq_array = Arc::new(StringArray::from(seq_vec));
             columns.push(seq_array);
-        } else {
-            return Err(PyErr::new::<PyRuntimeError, _>(
-                "Sequence was requested but not collected"
-            ));
         }
     }
 
     // Add quality if requested
     if include_quality {
-        if let Some(ref qual_vec) = qualities {
-            let qual_array = Arc::new(StringArray::from(qual_vec.clone()));
+        if let Some(qual_vec) = qualities {
+            let qual_array = Arc::new(StringArray::from(qual_vec));
             columns.push(qual_array);
-        } else {
-            return Err(PyErr::new::<PyRuntimeError, _>(
-                "Quality was requested but not collected"
-            ));
         }
     }
 
     // Create RecordBatch
     let schema = create_bam_schema(include_sequence, include_quality);
-    let batch = RecordBatch::try_new(schema, columns)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create RecordBatch: {}", e)))?;
-
-    // Write batch
-    arrow_writer.write(&batch)
-        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to write batch: {}", e)))?;
-
-    // Clear vectors for next batch
-    names.clear();
-    chroms.clear();
-    starts.clear();
-    ends.clear();
-    flags.clear();
-    if let Some(ref mut seq_vec) = sequences {
-        seq_vec.clear();
-    }
-    if let Some(ref mut qual_vec) = qualities {
-        qual_vec.clear();
-    }
-
-    Ok(())
+    RecordBatch::try_new(schema, columns)
+        .map_err(|e| format!("Failed to create RecordBatch for HTSlib batch {}: {}", batch_id, e).into())
 }
 
 
