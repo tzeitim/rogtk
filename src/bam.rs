@@ -1723,7 +1723,7 @@ pub fn bam_to_arrow_ipc_htslib_mmap_parallel(
 
     let effective_batch_size = batch_size.min(1000000);
     let effective_num_workers = num_workers.max(1).min(16);
-    let effective_chunk_size = (chunk_size_mb * 1024 * 1024).max(1024 * 1024); // Min 1MB
+    let _effective_chunk_size = (chunk_size_mb * 1024 * 1024).max(1024 * 1024); // Min 1MB
     let effective_bgzf_threads = bgzf_threads_per_worker.max(1).min(8);
     
     if let Some(parent) = output_path.parent() {
