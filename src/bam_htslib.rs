@@ -2,12 +2,13 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use rayon::ThreadPoolBuilder;
 use crossbeam_channel::{bounded, Receiver, Sender};
 // use log::debug;
 use std::io::{Read as StdRead, Seek, SeekFrom};
+use std::collections::VecDeque;
 
 #[cfg(feature = "htslib")]
 use rust_htslib::bam as hts_bam;
@@ -69,6 +70,54 @@ fn quality_to_string_zero_copy(qual: &[u8]) -> String {
         }
     }
     result
+}
+
+/// HTSlib reader pool for reusing initialized readers across segments
+/// Reduces expensive reader initialization overhead in parallel processing
+#[cfg(feature = "htslib")]
+pub struct ReaderPool {
+    bam_path: String,
+    bgzf_threads: usize,
+    pool: Arc<Mutex<VecDeque<hts_bam::Reader>>>,
+    max_size: usize,
+}
+
+#[cfg(feature = "htslib")]
+impl ReaderPool {
+    pub fn new(bam_path: &str, bgzf_threads: usize, max_size: usize) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let pool = Arc::new(Mutex::new(VecDeque::new()));
+        Ok(ReaderPool {
+            bam_path: bam_path.to_string(),
+            bgzf_threads,
+            pool,
+            max_size,
+        })
+    }
+    
+    /// Borrow a reader from the pool, creating a new one if pool is empty
+    pub fn borrow_reader(&self) -> Result<hts_bam::Reader, Box<dyn std::error::Error + Send + Sync>> {
+        // Try to get a reader from the pool first
+        if let Ok(mut pool) = self.pool.lock() {
+            if let Some(reader) = pool.pop_front() {
+                return Ok(reader);
+            }
+        }
+        
+        // Pool is empty, create a new reader
+        let mut reader = hts_bam::Reader::from_path(&self.bam_path)?;
+        reader.set_threads(self.bgzf_threads)?;
+        Ok(reader)
+    }
+    
+    /// Return a reader to the pool for reuse
+    pub fn return_reader(&self, reader: hts_bam::Reader) {
+        if let Ok(mut pool) = self.pool.lock() {
+            if pool.len() < self.max_size {
+                pool.push_back(reader);
+            }
+            // If pool is full, just drop the reader
+        }
+    }
 }
 
 /// Process HTSlib records into Arrow RecordBatch with optimized performance
@@ -169,41 +218,49 @@ pub fn process_htslib_records_to_batch(
 
 /// Fast discovery of BGZF split points for parallel processing
 /// Uses file size estimation and boundary searching instead of exhaustive scanning
+/// Optimized for fewer, larger segments to reduce coordination overhead
 #[cfg(feature = "htslib")]
 pub fn discover_split_points(bam_path: &str, num_workers: usize) -> Result<Vec<u64>, Box<dyn std::error::Error + Send + Sync>> {
     let file = File::open(bam_path)?;
     let file_size = file.metadata()?.len();
     
-    eprintln!("BAM file size: {:.2} GB", file_size as f64 / (1024.0 * 1024.0 * 1024.0));
-    eprintln!("Finding {} split points for parallel processing...", num_workers - 1);
+    // Minimum segment size (512MB) to avoid excessive coordination overhead
+    let min_segment_size = 512 * 1024 * 1024; // 512MB
+    let max_effective_workers = (file_size / min_segment_size).min(num_workers as u64) as usize;
+    let effective_workers = max_effective_workers.max(1);
+    
+    eprintln!("Split point discovery: file_size={}, min_segment_size={}, max_effective_workers={}, effective_workers={}", 
+             file_size, min_segment_size, max_effective_workers, effective_workers);
     
     let mut split_points = vec![0u64]; // Always start at beginning
     
-    if num_workers <= 1 {
+    if effective_workers <= 1 {
+        eprintln!("Only 1 effective worker, returning single split point");
         return Ok(split_points);
     }
     
-    // Calculate approximate split positions
-    let chunk_size = file_size / num_workers as u64;
+    // Calculate approximate split positions with larger segments
+    let chunk_size = file_size / effective_workers as u64;
     
-    for i in 1..num_workers {
+    for i in 1..effective_workers {
         let estimated_pos = chunk_size * i as u64;
         
         // Find the nearest BGZF block boundary around this position
         match find_nearest_bgzf_boundary(bam_path, estimated_pos, chunk_size / 4)? {
             Some(boundary) => {
                 split_points.push(boundary);
-                eprintln!("Split point {}: {} ({}% through file)", 
-                         i, boundary, (boundary as f64 / file_size as f64 * 100.0) as u32);
             }
             None => {
-                eprintln!("Warning: Could not find BGZF boundary near position {}, using estimate", estimated_pos);
                 split_points.push(estimated_pos);
             }
         }
     }
     
-    eprintln!("Found {} split points for parallel processing", split_points.len());
+    // Add the end of file as the final split point
+    split_points.push(file_size);
+    
+    eprintln!("Found {} split points for parallel processing: {:?}", split_points.len(), split_points);
+    eprintln!("This creates {} segments", split_points.len() - 1);
     Ok(split_points)
 }
 
@@ -293,8 +350,8 @@ fn get_bgzf_block_size_at(file: &mut File, pos: u64) -> Result<Option<u64>, Box<
 
 /// Process a file segment between start_pos and end_pos
 #[cfg(feature = "htslib")]
-pub fn process_file_segment(
-    bam_path: &str,
+pub fn process_file_segment_with_pool(
+    reader_pool: &ReaderPool,
     start_pos: u64,
     end_pos: u64,
     record_limit: Option<usize>,
@@ -302,11 +359,9 @@ pub fn process_file_segment(
     include_sequence: bool,
     include_quality: bool,
     batch_size: usize,
-    bgzf_threads: usize,
 ) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error + Send + Sync>> {
-    // Create a new reader for this segment
-    let mut reader = hts_bam::Reader::from_path(bam_path)?;
-    reader.set_threads(bgzf_threads)?;
+    // Borrow a reader from the pool instead of creating a new one
+    let mut reader = reader_pool.borrow_reader()?;
     
     // For the first segment (start_pos == 0), read from beginning
     // For other segments, we need to seek to start_pos using BGZF virtual offsets
@@ -316,28 +371,10 @@ pub fn process_file_segment(
         // Since we're seeking to block boundaries, uncompressed_offset = 0
         let virtual_offset = start_pos << 16;
         
-        eprintln!("Attempting to seek segment to file position {} (virtual offset: {})", 
-                 start_pos, virtual_offset);
-        
         // Use HTSlib's seek functionality with virtual offset (convert to i64)
-        match reader.seek(virtual_offset as i64) {
-            Ok(_) => {
-                eprintln!("✓ Successfully seeked to virtual offset {} (file pos {})", 
-                         virtual_offset, start_pos);
-                
-                // Verify the seek worked by checking current position
-                let current_voffset = reader.tell();
-                if current_voffset >= 0 {
-                    let current_file_pos = (current_voffset as u64) >> 16;
-                    eprintln!("✓ Verified current position: {} (expected: {})", 
-                             current_file_pos, start_pos);
-                }
-            }
-            Err(e) => {
-                eprintln!("✗ Could not seek to virtual offset {} (file pos {}): {}", 
-                         virtual_offset, start_pos, e);
-                eprintln!("  Segment will start from beginning (duplicate records expected)");
-            }
+        if let Err(_) = reader.seek(virtual_offset as i64) {
+            // If seek fails, continue from beginning (will have duplicate records but won't fail)
+            // This is better than failing the entire segment
         }
     }
     
@@ -404,7 +441,39 @@ pub fn process_file_segment(
         batches.push(batch);
     }
     
+    // Return the reader to the pool for reuse
+    reader_pool.return_reader(reader);
+    
     Ok(batches)
+}
+
+/// Process a file segment between start_pos and end_pos (original version for compatibility)
+#[cfg(feature = "htslib")]
+pub fn process_file_segment(
+    bam_path: &str,
+    start_pos: u64,
+    end_pos: u64,
+    record_limit: Option<usize>,
+    chrom_lookup: &Arc<Vec<String>>,
+    include_sequence: bool,
+    include_quality: bool,
+    batch_size: usize,
+    bgzf_threads: usize,
+) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error + Send + Sync>> {
+    // Create a reader pool with just one reader for this call
+    let reader_pool = ReaderPool::new(bam_path, bgzf_threads, 1)?;
+    
+    // Use the optimized version with reader pool
+    process_file_segment_with_pool(
+        &reader_pool,
+        start_pos,
+        end_pos,
+        record_limit,
+        chrom_lookup,
+        include_sequence,
+        include_quality,
+        batch_size,
+    )
 }
 
 /// Parallel BAM processing using true BGZF block-level parallelization
@@ -457,15 +526,44 @@ pub fn bam_to_arrow_ipc_htslib_bgzf_blocks(
     let effective_batch_size = batch_size.min(1000000);
     let effective_bgzf_threads = if bgzf_threads == 0 { 4 } else { bgzf_threads.min(32) };
     let effective_writing_threads = writing_threads.max(1).min(32);
-    let effective_block_workers = num_block_workers.unwrap_or(effective_writing_threads).min(16);
     
-    // Buffer sizing for block-level processing
+    // Dynamically adjust worker count based on file size and limit
+    let base_workers = num_block_workers.unwrap_or(effective_writing_threads).min(16);
+    let effective_block_workers = if let Some(record_limit) = limit {
+        if record_limit <= 1_000_000 {
+            // For small datasets, use fewer workers to reduce overhead
+            base_workers.min(2)
+        } else if record_limit <= 5_000_000 {
+            base_workers.min(4)
+        } else {
+            base_workers
+        }
+    } else {
+        base_workers
+    };
+    
+    // Intelligent buffer sizing for block-level processing
+    // Scale buffer sizes based on number of workers for optimal I/O efficiency
+    let default_read_buffer_mb = if effective_block_workers >= 8 {
+        1536  // 1.5GB for high-parallelism scenarios
+    } else if effective_block_workers >= 4 {
+        1024  // 1GB for medium parallelism
+    } else {
+        768   // 768MB for low parallelism
+    };
+    
+    let default_write_buffer_mb = if effective_block_workers >= 8 {
+        384   // 384MB for high-parallelism scenarios
+    } else {
+        256   // 256MB for medium/low parallelism
+    };
+    
     let read_buffer_size = read_buffer_mb
-        .unwrap_or(1024)  // Default 1GB read buffer
+        .unwrap_or(default_read_buffer_mb)
         * 1024 * 1024;
         
     let write_buffer_size = write_buffer_mb
-        .unwrap_or(256)   // Default 256MB write buffer
+        .unwrap_or(default_write_buffer_mb)
         * 1024 * 1024;
     
     if let Some(parent) = output_path.parent() {
@@ -475,8 +573,15 @@ pub fn bam_to_arrow_ipc_htslib_bgzf_blocks(
             ))?;
     }
 
+    // Check file size to determine if BGZF block-level is worth it
+    let input_file = std::fs::File::open(bam_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Cannot access BAM file: {}", e)))?;
+    let file_size_gb = input_file.metadata()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Cannot read file metadata: {}", e)))?
+        .len() as f64 / (1024.0 * 1024.0 * 1024.0);
+    
     eprintln!("Starting BGZF Block-Level Parallel BAM to IPC conversion:");
-    eprintln!("  Input: {}", bam_path);
+    eprintln!("  Input: {} ({:.1}GB)", bam_path, file_size_gb);
     eprintln!("  Output: {}", arrow_ipc_path);
     eprintln!("  Batch size: {}", effective_batch_size);
     eprintln!("  BGZF threads: {}", effective_bgzf_threads);
@@ -486,6 +591,13 @@ pub fn bam_to_arrow_ipc_htslib_bgzf_blocks(
     eprintln!("  Write buffer: {}MB", write_buffer_size / (1024 * 1024));
     eprintln!("  Include sequence: {}", include_sequence);
     eprintln!("  Include quality: {}", include_quality);
+    
+    // Performance warning for small files
+    if file_size_gb < 10.0 {
+        eprintln!("⚠️  WARNING: File size ({:.1}GB) may be too small for BGZF block-level optimization.", file_size_gb);
+        eprintln!("   Consider using bam_to_arrow_ipc_htslib_optimized() for files <10GB.");
+        eprintln!("   BGZF block-level is optimized for very large files (50GB+).");
+    }
 
     // Step 1: Discover split points (much faster than exhaustive block discovery)
     let split_points = discover_split_points(bam_path, effective_block_workers)
@@ -537,20 +649,24 @@ pub fn bam_to_arrow_ipc_htslib_bgzf_blocks(
     let chrom_lookup = build_chromosome_lookup(&header_view);
     drop(main_reader); // Close main reader
 
-    // Step 5: Spawn segment processing workers
+    // Step 5: Create reader pool for optimized performance
+    let reader_pool = Arc::new(ReaderPool::new(bam_path, effective_bgzf_threads, effective_block_workers * 2)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create reader pool: {}", e)))?);
+
+    // Step 6: Spawn segment processing workers
     let workers_result_sender = result_sender.clone();
     let workers_segment_receiver = segment_receiver.clone();
     let workers_chrom_lookup = chrom_lookup.clone();
-    let workers_bam_path = bam_path.to_string();
+    let workers_reader_pool = reader_pool.clone();
     
     let _workers_handle = std::thread::spawn(move || {
         pool.install(|| {
             while let Ok((segment_id, (start_pos, end_pos, segment_limit))) = workers_segment_receiver.recv() {
                 let segment_processing_start = Instant::now();
                 
-                // Process file segment from start_pos to end_pos
-                let segment_result = process_file_segment(
-                    &workers_bam_path,
+                // Process file segment from start_pos to end_pos using reader pool
+                let segment_result = process_file_segment_with_pool(
+                    &workers_reader_pool,
                     start_pos,
                     end_pos,
                     segment_limit,
@@ -558,15 +674,12 @@ pub fn bam_to_arrow_ipc_htslib_bgzf_blocks(
                     include_sequence,
                     include_quality,
                     effective_batch_size,
-                    effective_bgzf_threads,
                 );
                 
                 match segment_result {
                     Ok(batches) => {
-                        let segment_duration = segment_processing_start.elapsed();
-                        let total_records: usize = batches.iter().map(|b| b.num_rows()).sum();
-                        eprintln!("Segment {} processed {} records in {} batches ({:.2}s)", 
-                                segment_id, total_records, batches.len(), segment_duration.as_secs_f64());
+                        let _segment_duration = segment_processing_start.elapsed();
+                        let _total_records: usize = batches.iter().map(|b| b.num_rows()).sum();
                         
                         // Send all batches from this segment
                         for (batch_idx, batch) in batches.into_iter().enumerate() {

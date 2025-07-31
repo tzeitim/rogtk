@@ -25,6 +25,7 @@ try:
         bam_to_arrow_ipc_htslib_optimized,
         bam_to_arrow_ipc_htslib_mmap_parallel,
         bam_to_arrow_ipc_htslib_bgzf_blocks,
+        bam_to_arrow_ipc_htslib_hybrid_segments,
     )
     _HTSLIB_AVAILABLE = True
 except ImportError:

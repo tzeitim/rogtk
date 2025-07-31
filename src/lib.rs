@@ -23,6 +23,7 @@ mod fracture_opt;
 mod djfind;
 mod bam;
 mod bam_htslib;
+mod bam_htslib_hybrid;
 mod umi_score;
 
 use crate::single_fastq::{fastq_to_parquet};
@@ -32,6 +33,8 @@ use crate::bam::{bam_to_parquet, bam_to_arrow_ipc, bam_to_arrow_ipc_parallel, ba
 use crate::bam::{bam_to_arrow_ipc_htslib_parallel, bam_to_arrow_ipc_htslib_multi_reader_parallel, bam_to_arrow_ipc_htslib_optimized, bam_to_arrow_ipc_htslib_mmap_parallel};
 #[cfg(feature = "htslib")]
 use crate::bam_htslib::{bam_to_arrow_ipc_htslib_bgzf_blocks};
+#[cfg(feature = "htslib")]
+use crate::bam_htslib_hybrid::{bam_to_arrow_ipc_htslib_hybrid_segments};
 
 
 //extern crate fasten;
@@ -486,6 +489,8 @@ fn rogtk(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bam_to_arrow_ipc_htslib_mmap_parallel, m)?)?;
     #[cfg(feature = "htslib")]
     m.add_function(wrap_pyfunction!(bam_to_arrow_ipc_htslib_bgzf_blocks, m)?)?;
+    #[cfg(feature = "htslib")]
+    m.add_function(wrap_pyfunction!(bam_to_arrow_ipc_htslib_hybrid_segments, m)?)?;
 
     //m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
