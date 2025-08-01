@@ -1,3 +1,35 @@
+/*!
+ * DEPRECATED: Multi-Segment Hybrid BAM Processing
+ * 
+ * ⚠️  This implementation is preserved as a CODE RELIC for research and educational purposes.
+ * 🚫 DO NOT USE in production - use `bam_to_arrow_ipc_htslib_optimized()` instead.
+ * 
+ * ## Performance Analysis Results:
+ * - **This implementation**: ~109k rec/sec (18.4s for 2M records)
+ * - **Single optimized reader**: 205k rec/sec (9.7s for 2M records) 
+ * - **Performance gap**: 47% slower than single-reader baseline
+ * 
+ * ## Root Cause: BGZF I/O Serialization Bottleneck
+ * The fundamental issue is that multiple concurrent readers accessing the same BAM file
+ * create BGZF random access conflicts, resulting in 94.6% efficiency loss per segment.
+ * 
+ * ## Technical Details:
+ * - Multiple readers → same file → I/O contention
+ * - BGZF seeking conflicts destroy cache efficiency  
+ * - Thread contention is NOT the primary bottleneck
+ * - Would work well with PRE-SPLIT BAM files (separate physical files)
+ * 
+ * ## Historical Context:
+ * This represents Phase 6 of the optimization roadmap, which achieved the critical
+ * breakthrough of fixing data loss issues (87.5% → 0%) through proper Arrow IPC
+ * concatenation, but revealed the fundamental I/O limitations of the multi-reader approach.
+ * 
+ * ## See Also:
+ * - PERFORMANCE_ROADMAP.md Phase 7 for detailed analysis
+ * - `bam_to_arrow_ipc_htslib_optimized()` for production use
+ * - Sequential-parallel architecture proposals for future development
+ */
+
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 use std::fs::File;

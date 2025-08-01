@@ -55,14 +55,9 @@ pub fn build_chromosome_lookup(header: &hts_bam::HeaderView) -> std::collections
 
 /// Build chromosome lookup table from HTSlib header (Arc version for compatibility)
 #[cfg(feature = "htslib")]
-pub fn build_chromosome_lookup_arc(header: &hts_bam::HeaderView) -> Arc<Vec<String>> {
-    let mut lookup = Vec::new();
-    for tid in 0..header.target_count() {
-        let chrom_name = String::from_utf8_lossy(header.tid2name(tid as u32)).into_owned();
-        lookup.push(chrom_name);
-    }
-    Arc::new(lookup)
-}
+// Removed unused function: build_chromosome_lookup_arc
+// This was a duplicate of build_chromosome_lookup but returning Arc<Vec<String>>
+// No references found in active codebase or relic code
 
 /// Zero-copy quality score processing for maximum performance
 #[cfg(feature = "htslib")]
@@ -130,77 +125,13 @@ impl ReaderPool {
     }
 }
 
-/// Build optimized record batch with SIMD-like processing
-#[cfg(feature = "htslib")]
-pub fn build_optimized_record_batch(
-    qnames: Vec<Option<String>>,
-    flags: Vec<Option<i32>>,
-    chromosomes: Vec<Option<String>>,
-    positions: Vec<Option<i64>>,
-    mapping_qualities: Vec<Option<i32>>,
-    cigars: Vec<Option<String>>,
-    rnexts: Vec<Option<String>>,
-    pnexts: Vec<Option<i64>>,
-    template_lengths: Vec<Option<i64>>,
-    sequences: Option<Vec<Option<String>>>,
-    qualities: Option<Vec<Option<String>>>,
-    include_sequence: bool,
-    include_quality: bool,
-) -> Result<RecordBatch, Box<dyn std::error::Error + Send + Sync>> {
-    let mut arrays: Vec<Arc<dyn Array>> = vec![
-        Arc::new(StringArray::from(qnames)),
-        Arc::new(Int32Array::from(flags)),
-        Arc::new(StringArray::from(chromosomes)),
-        Arc::new(Int64Array::from(positions)),
-        Arc::new(Int32Array::from(mapping_qualities)),
-        Arc::new(StringArray::from(cigars)),
-        Arc::new(StringArray::from(rnexts)),
-        Arc::new(Int64Array::from(pnexts)),
-        Arc::new(Int64Array::from(template_lengths)),
-    ];
-    
-    if include_sequence {
-        if let Some(seq) = sequences {
-            arrays.push(Arc::new(StringArray::from(seq)));
-        }
-    }
-    
-    if include_quality {
-        if let Some(qual) = qualities {
-            arrays.push(Arc::new(StringArray::from(qual)));
-        }
-    }
-    
-    let schema = create_optimized_bam_schema(include_sequence, include_quality);
-    let batch = RecordBatch::try_new(Arc::new(schema), arrays)?;
-    
-    Ok(batch)
-}
+// REMOVED: build_optimized_record_batch function
+// Was only used by deprecated hybrid relic code (bam_htslib_hybrid_optimized.rs)
+// Since relic modules are not compiled, this function is no longer needed
 
-/// Create optimized schema for advanced hybrid processing
-pub fn create_optimized_bam_schema(include_sequence: bool, include_quality: bool) -> Schema {
-    let mut fields = vec![
-        Field::new("qname", DataType::Utf8, true),
-        Field::new("flag", DataType::Int32, true),
-        Field::new("rname", DataType::Utf8, true),
-        Field::new("pos", DataType::Int64, true),
-        Field::new("mapq", DataType::Int32, true),
-        Field::new("cigar", DataType::Utf8, true),
-        Field::new("rnext", DataType::Utf8, true),
-        Field::new("pnext", DataType::Int64, true),
-        Field::new("tlen", DataType::Int64, true),
-    ];
-    
-    if include_sequence {
-        fields.push(Field::new("seq", DataType::Utf8, true));
-    }
-    
-    if include_quality {
-        fields.push(Field::new("qual", DataType::Utf8, true));
-    }
-    
-    Schema::new(fields)
-}
+// REMOVED: create_optimized_bam_schema function  
+// Was only used by deprecated build_optimized_record_batch function
+// Since relic modules are not compiled, this function is no longer needed
 
 /// Process HTSlib records into Arrow RecordBatch with optimized performance
 #[cfg(feature = "htslib")]

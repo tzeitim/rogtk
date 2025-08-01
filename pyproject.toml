@@ -8,7 +8,7 @@ build-backend = "maturin"
 
 [project]
 name = "rogtk"
-version = "0.1.18-dev"
+version = "0.1.18"
 description = "Rust-based genomics toolkit - high-performance backend for ogtk"
 authors = [
     {name = "Pedro Olivares", email = "pedroy.final@gmail.com"}

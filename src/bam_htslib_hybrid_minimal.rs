@@ -1,3 +1,14 @@
+/*!
+ * DEPRECATED: Hybrid Minimal Fix BAM Processing  
+ * 
+ * ⚠️  CODE RELIC - Preserved for research purposes only
+ * 🚫 Use `bam_to_arrow_ipc_htslib_optimized()` for production (205k+ rec/sec)
+ * 
+ * This was a minimal fix attempt for the hybrid approach, but the fundamental
+ * BGZF I/O bottleneck cannot be resolved through parameter tuning alone.
+ * See PERFORMANCE_ROADMAP.md Phase 7 for detailed analysis.
+ */
+
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 use std::fs::File;

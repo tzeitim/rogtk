@@ -1,3 +1,14 @@
+/*!
+ * DEPRECATED: Hybrid Optimized BAM Processing
+ * 
+ * ⚠️  CODE RELIC - Preserved for research purposes only
+ * 🚫 Use `bam_to_arrow_ipc_htslib_optimized()` for production (205k+ rec/sec)
+ * 
+ * This variant attempted parameter optimizations on the hybrid approach but 
+ * still suffers from the fundamental BGZF I/O serialization bottleneck.
+ * See PERFORMANCE_ROADMAP.md Phase 7 for detailed analysis.
+ */
+
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 use std::fs::File;
