@@ -17,3 +17,4 @@ Cargo.lock
 .tmp*.dot
 .tmp*.csv
 MANIFEST.in
+.ipython/profile_default
