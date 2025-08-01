@@ -18,3 +18,5 @@ Cargo.lock
 .tmp*.csv
 MANIFEST.in
 .ipython/profile_default
+package-lock.json
+package.json
