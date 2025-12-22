@@ -162,6 +162,7 @@ pub fn find_shortest_path(
     let mut best_path = None;
     let mut min_total_weight = f64::INFINITY;
     const MAX_ITERATIONS: usize = 1000; // Safety limit
+    const FLOAT_EPSILON: f64 = 1e-9; // For floating-point comparison in path reconstruction
 
     for &start in start_nodes {
         let distances = dijkstra(graph, start, None, |e| *e.weight());
@@ -192,11 +193,23 @@ pub fn find_shortest_path(
                         
                         for neighbor in graph.neighbors_directed(current, Incoming) {
                             if let Some(&neighbor_dist) = distances.get(&neighbor) {
-                                trace!("  Checking neighbor: {} with distance {}", graph[neighbor], neighbor_dist);
-                                if neighbor_dist < best_dist {
-                                    best_dist = neighbor_dist;
-                                    best_prev = Some(neighbor);
-                                    trace!("    New best neighbor: {} with dist {}", graph[neighbor], neighbor_dist);
+                                // Get the edge weight from neighbor to current
+                                if let Some(edge_idx) = graph.find_edge(neighbor, current) {
+                                    let edge_weight = graph[edge_idx];
+                                    let expected_dist = neighbor_dist + edge_weight;
+
+                                    trace!("  Checking neighbor: {} dist={}, edge_weight={}, expected_dist={}",
+                                           graph[neighbor], neighbor_dist, edge_weight, expected_dist);
+
+                                    // Check if this neighbor is on the shortest path (within float epsilon)
+                                    if (expected_dist - current_dist).abs() < FLOAT_EPSILON {
+                                        // Use neighbor_dist as tie-breaker for determinism
+                                        if neighbor_dist < best_dist {
+                                            best_dist = neighbor_dist;
+                                            best_prev = Some(neighbor);
+                                            trace!("    Valid predecessor on shortest path: {}", graph[neighbor]);
+                                        }
+                                    }
                                 }
                             }
                         }
