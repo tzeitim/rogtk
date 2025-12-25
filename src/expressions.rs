@@ -322,6 +322,93 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
     ).into_series())
 }
 
+/// Assembly expression that takes anchor sequences from input columns instead of kwargs.
+/// This enables per-group dynamic anchors in group_by operations.
+///
+/// inputs[0] = sequences (String column)
+/// inputs[1] = start_anchor (String column - first value used)
+/// inputs[2] = end_anchor (String column - first value used)
+#[polars_expr(output_type_func=output_string_type)]
+fn assemble_sequences_with_anchors_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsResult<Series> {
+    debug!("Received kwargs for dynamic anchors: {:?}", kwargs);
+
+    // Validate we have at least 3 inputs
+    if inputs.len() < 3 {
+        return Err(PolarsError::ComputeError(
+            "assemble_sequences_with_anchors requires 3 inputs: sequences, start_anchor, end_anchor".into()
+        ));
+    }
+
+    // Extract anchor strings from the first row of each anchor column
+    let start_anchor_series = inputs[1].str()?;
+    let end_anchor_series = inputs[2].str()?;
+
+    let start_anchor = start_anchor_series.get(0)
+        .ok_or_else(|| PolarsError::ComputeError(
+            "start_anchor column is empty".into()
+        ))?
+        .to_string();
+
+    let end_anchor = end_anchor_series.get(0)
+        .ok_or_else(|| PolarsError::ComputeError(
+            "end_anchor column is empty".into()
+        ))?
+        .to_string();
+
+    debug!("Dynamic anchors - start: {}, end: {}", start_anchor, end_anchor);
+
+    // Build assembly method - for dynamic anchors, we only support shortest_path
+    let method = match kwargs.method.as_str() {
+        "compression" => {
+            return Err(PolarsError::ComputeError(
+                "compression method is not supported with dynamic anchors; use shortest_path".into()
+            ));
+        },
+        "shortest_path" => AssemblyMethod::ShortestPath {
+            start_anchor: start_anchor.clone(),
+            end_anchor: end_anchor.clone(),
+        },
+        "shortest_path_auto" => {
+            return Err(PolarsError::ComputeError(
+                "shortest_path_auto method is not supported with dynamic anchors; use shortest_path".into()
+            ));
+        },
+        _ => return Err(PolarsError::ComputeError(
+            "Invalid assembly method for dynamic anchors. Must be 'shortest_path'".into()
+        )),
+    };
+
+    // Extract sequences from input series
+    let ca = inputs[0].str()?;
+
+    // Convert string chunk to Vec<String>
+    let sequences: Vec<String> = ca.into_iter()
+        .flatten()
+        .map(|s| s.to_string())
+        .collect();
+
+    // Call assembly function
+    let contigs = assemble_sequences(
+        sequences,
+        kwargs.k,
+        kwargs.min_coverage,
+        method,
+        kwargs.export_graphs,
+        Some(true), // Hardcoded to true
+        kwargs.min_length,
+        kwargs.auto_k,
+        kwargs.prefix,
+    ).map_err(|e| PolarsError::ComputeError(
+        format!("Assembly failed: {}", e).into()
+    ))?;
+
+    let result = contigs.join("\n");
+    Ok(StringChunked::from_slice(
+        PlSmallStr::from_str("assembled_sequences"),
+        &[result.as_str()]
+    ).into_series())
+}
+
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct SweepParams {

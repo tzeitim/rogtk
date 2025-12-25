@@ -152,6 +152,84 @@ def assemble_sequences(
         is_elementwise=False,
     )
 
+def assemble_sequences_with_anchors(
+    expr: IntoExpr,
+    start_anchor_col: IntoExpr,
+    end_anchor_col: IntoExpr,
+    k: int = 17,
+    min_coverage: int = 25,
+    method: str = 'shortest_path',
+    min_length: int | None = None,
+    export_graphs: bool = False,
+    auto_k: bool = False,
+    prefix: str | None = None
+) -> pl.Expr:
+    """
+    Assemble DNA sequences with dynamic per-group anchor sequences from columns.
+
+    This function enables single group_by assembly operations where each group
+    can have different start/end anchors, avoiding slow Python loops over segment types.
+
+    Parameters
+    ----------
+    expr : IntoExpr
+        Input expression containing DNA sequences to assemble
+    start_anchor_col : IntoExpr
+        Column expression containing start anchor sequences (first value per group used)
+    end_anchor_col : IntoExpr
+        Column expression containing end anchor sequences (first value per group used)
+    k : int, default 17
+        K-mer size for graph construction
+    min_coverage : int, default 25
+        Minimum k-mer coverage threshold
+    method : str, default 'shortest_path'
+        Assembly method (only 'shortest_path' supported with dynamic anchors)
+    min_length : int, optional
+        Minimum contig length to return
+    export_graphs : bool, default False
+        Whether to export graph visualization files
+    auto_k : bool, default False
+        Whether to automatically adjust k-mer size
+    prefix : str, optional
+        Prefix for output files when export_graphs is True
+
+    Returns
+    -------
+    pl.Expr
+        Expression returning assembled consensus sequence(s)
+
+    Examples
+    --------
+    >>> segments.group_by(['umi', 'start_meta', 'end_meta']).agg(
+    ...     rogtk.assemble_sequences_with_anchors(
+    ...         expr=pl.col('segment_seq'),
+    ...         start_anchor_col=pl.first('start_meta_seq'),
+    ...         end_anchor_col=pl.first('end_meta_seq'),
+    ...         k=15,
+    ...         min_coverage=20,
+    ...     ).alias('consensus_seq')
+    ... )
+    """
+    return register_plugin_function(
+        plugin_path=Path(__file__).parent,
+        function_name="assemble_sequences_with_anchors_expr",
+        args=[expr, start_anchor_col, end_anchor_col],
+        kwargs={
+            "k": k,
+            "min_coverage": min_coverage,
+            "method": method,
+            "start_anchor": None,  # Not used - anchors come from columns
+            "end_anchor": None,    # Not used - anchors come from columns
+            "min_length": min_length,
+            "export_graphs": export_graphs,
+            "only_largest": False,
+            "auto_k": auto_k,
+            "prefix": prefix
+        },
+        returns_scalar=True,
+        is_elementwise=False,
+    )
+
 def sweep_assembly_params(
     expr: IntoExpr,
     k_start: int = 5,
