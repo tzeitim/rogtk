@@ -490,26 +490,26 @@ class UmiNamespace:
 def umi_complexity_scores(expr: IntoExpr) -> pl.Expr:
     """
     Calculate all UMI complexity scores and return them as separate columns.
-    
+
     This function returns a struct containing:
     - shannon_entropy: Shannon entropy of nucleotide frequencies
-    - linguistic_complexity: Ratio of unique k-mers to total possible k-mers  
+    - linguistic_complexity: Ratio of unique k-mers to total possible k-mers
     - homopolymer_fraction: Fraction of sequence in homopolymer runs (3+ bases)
     - dinucleotide_entropy: Entropy of dinucleotide frequencies
     - longest_homopolymer_run: Length of longest homopolymer run
     - dust_score: DUST score for low-complexity detection
     - combined_score: Weighted combination of all metrics
-    
+
     Parameters
     ----------
     expr : IntoExpr
         Input expression containing UMI sequences
-        
+
     Returns
     -------
     pl.Expr
         Struct expression with all complexity scores
-        
+
     Examples
     --------
     >>> df.with_columns(umi_complexity_scores(pl.col("umi")))
@@ -519,5 +519,98 @@ def umi_complexity_scores(expr: IntoExpr) -> pl.Expr:
         plugin_path=Path(__file__).parent,
         function_name="umi_complexity_all_expr",
         args=expr,
+        is_elementwise=True,
+    )
+
+
+@pl.api.register_expr_namespace("cigar")
+class CigarNamespace:
+    """Namespace for CIGAR string operations on Polars expressions."""
+
+    def __init__(self, expr: pl.Expr):
+        self._expr = expr
+
+    def enrich_insertions(self, seq_col: IntoExpr, cigar_col: IntoExpr) -> pl.Expr:
+        """Enrich allele strings with actual insertion sequences from CIGAR.
+
+        Transforms [pos:NI] notation to [pos:NI:SEQUENCE] by extracting
+        the actual inserted bases from the aligned sequence using the CIGAR string.
+
+        Parameters
+        ----------
+        seq_col : IntoExpr
+            Column containing the aligned sequence (e.g., 'Seq')
+        cigar_col : IntoExpr
+            Column containing the CIGAR string
+
+        Returns
+        -------
+        pl.Expr
+            Enriched allele string with insertion sequences
+
+        Examples
+        --------
+        >>> # Enrich a single allele column
+        >>> df.with_columns(
+        ...     pl.col('r1').cigar.enrich_insertions(pl.col('Seq'), pl.col('CIGAR'))
+        ... )
+
+        >>> # Enrich multiple allele columns (r1-r15)
+        >>> df.with_columns([
+        ...     pl.col(f'r{i}').cigar.enrich_insertions(pl.col('Seq'), pl.col('CIGAR')).alias(f'r{i}')
+        ...     for i in range(1, 16)
+        ... ])
+
+        Notes
+        -----
+        Input allele format: "TAGTCATTAC[78:5I]ACTTAGACAGGTG"
+        Output format: "TAGTCATTAC[78:5I:GCTAG]ACTTAGACAGGTG"
+
+        The CIGAR string is parsed to locate insertion positions and extract
+        the actual inserted bases from the sequence column.
+        """
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="enrich_allele_insertions_expr",
+            args=[self._expr, seq_col, cigar_col],
+            is_elementwise=True,
+        )
+
+
+def extract_cigar_insertions(seq_col: IntoExpr, cigar_col: IntoExpr) -> pl.Expr:
+    """Extract all insertions from CIGAR alignment as position:sequence pairs.
+
+    Parses CIGAR strings to find all insertion operations and extracts the
+    actual inserted bases from the corresponding sequence.
+
+    Parameters
+    ----------
+    seq_col : IntoExpr
+        Column containing the aligned sequence
+    cigar_col : IntoExpr
+        Column containing the CIGAR string
+
+    Returns
+    -------
+    pl.Expr
+        String in format "pos1:seq1|pos2:seq2|..." where each pair represents
+        an insertion at a reference position with its actual sequence.
+        Empty string if no insertions found.
+
+    Examples
+    --------
+    >>> df.with_columns(
+    ...     rogtk.extract_cigar_insertions(pl.col('Seq'), pl.col('CIGAR')).alias('insertions')
+    ... )
+
+    >>> # Filter to rows with insertions
+    >>> df.filter(
+    ...     rogtk.extract_cigar_insertions(pl.col('Seq'), pl.col('CIGAR')).str.len_chars() > 0
+    ... )
+    """
+    return register_plugin_function(
+        plugin_path=Path(__file__).parent,
+        function_name="extract_cigar_insertions_expr",
+        args=[seq_col, cigar_col],
         is_elementwise=True,
     )
