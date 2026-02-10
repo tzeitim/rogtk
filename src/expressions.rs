@@ -236,6 +236,212 @@ fn extract_cigar_insertions_expr(inputs: &[Series]) -> PolarsResult<Series> {
 }
 
 // ============================================================================
+// CIGAR Alignment Expansion Functions
+// ============================================================================
+
+/// Expand CIGAR into aligned reference and query strings with dashes for gaps.
+///
+/// Returns (aligned_ref, aligned_query) where:
+/// - aligned_ref has dashes where the query has insertions
+/// - aligned_query has dashes where the reference has deletions
+/// - Soft-clipped bases appear as lowercase in the query
+///
+/// CIGAR operations:
+/// - M/=/X: match/mismatch - consume both ref and query (uppercase)
+/// - I: insertion - add dashes to ref, consume query (uppercase)
+/// - D/N: deletion/skip - consume ref, add dashes to query
+/// - S: soft clip - add dashes to ref, consume query as LOWERCASE
+/// - H: hard clip - skip (bases not in query sequence)
+fn expand_cigar_alignment(ref_seq: &str, query_seq: &str, cigar: &str) -> Option<(String, String)> {
+    let ref_bytes = ref_seq.as_bytes();
+    let query_bytes = query_seq.as_bytes();
+
+    let mut aligned_ref = String::with_capacity(ref_seq.len() + query_seq.len());
+    let mut aligned_query = String::with_capacity(ref_seq.len() + query_seq.len());
+
+    let mut ref_pos: usize = 0;
+    let mut query_pos: usize = 0;
+    let mut num_buf = String::new();
+
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num_buf.push(c);
+        } else {
+            if let Ok(len) = num_buf.parse::<usize>() {
+                match c {
+                    'M' | '=' | 'X' => {
+                        // Match/mismatch: consume both ref and query (uppercase)
+                        for _ in 0..len {
+                            if ref_pos < ref_bytes.len() {
+                                aligned_ref.push((ref_bytes[ref_pos] as char).to_ascii_uppercase());
+                                ref_pos += 1;
+                            }
+                            if query_pos < query_bytes.len() {
+                                aligned_query.push((query_bytes[query_pos] as char).to_ascii_uppercase());
+                                query_pos += 1;
+                            }
+                        }
+                    }
+                    'I' => {
+                        // Insertion: add dashes to ref, consume query (uppercase)
+                        for _ in 0..len {
+                            aligned_ref.push('-');
+                            if query_pos < query_bytes.len() {
+                                aligned_query.push((query_bytes[query_pos] as char).to_ascii_uppercase());
+                                query_pos += 1;
+                            }
+                        }
+                    }
+                    'D' | 'N' => {
+                        // Deletion/skip: consume ref, add dashes to query
+                        for _ in 0..len {
+                            if ref_pos < ref_bytes.len() {
+                                aligned_ref.push((ref_bytes[ref_pos] as char).to_ascii_uppercase());
+                                ref_pos += 1;
+                            }
+                            aligned_query.push('-');
+                        }
+                    }
+                    'S' => {
+                        // Soft clip: add dashes to ref, consume query as LOWERCASE
+                        for _ in 0..len {
+                            aligned_ref.push('-');
+                            if query_pos < query_bytes.len() {
+                                aligned_query.push((query_bytes[query_pos] as char).to_ascii_lowercase());
+                                query_pos += 1;
+                            }
+                        }
+                    }
+                    'H' | 'P' => {
+                        // Hard clip/padding: bases not in query, skip
+                    }
+                    _ => {}
+                }
+            }
+            num_buf.clear();
+        }
+    }
+
+    Some((aligned_ref, aligned_query))
+}
+
+/// Polars expression: Expand CIGAR to produce aligned reference string
+///
+/// Takes 3 inputs:
+/// - inputs[0]: reference sequence (scalar or column)
+/// - inputs[1]: query sequence column
+/// - inputs[2]: CIGAR string column
+///
+/// Returns: aligned reference string with dashes where query has insertions
+#[polars_expr(output_type=String)]
+fn cigar_aligned_ref_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ref_ca: &StringChunked = inputs[0].str()?;
+    let query_ca: &StringChunked = inputs[1].str()?;
+    let cigar_ca: &StringChunked = inputs[2].str()?;
+
+    // Handle scalar reference (broadcast single value to all rows)
+    let is_scalar_ref = ref_ca.len() == 1 && query_ca.len() > 1;
+    let scalar_ref = if is_scalar_ref {
+        ref_ca.get(0)
+    } else {
+        None
+    };
+
+    let results: StringChunked = if is_scalar_ref {
+        // Broadcast scalar reference to all rows
+        query_ca
+            .into_iter()
+            .zip(cigar_ca.into_iter())
+            .map(|(query_opt, cigar_opt)| {
+                match (scalar_ref, query_opt, cigar_opt) {
+                    (Some(ref_seq), Some(query_seq), Some(cigar)) => {
+                        expand_cigar_alignment(ref_seq, query_seq, cigar)
+                            .map(|(aligned_ref, _)| aligned_ref)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    } else {
+        // All inputs are columns of same length
+        ref_ca
+            .into_iter()
+            .zip(query_ca.into_iter())
+            .zip(cigar_ca.into_iter())
+            .map(|((ref_opt, query_opt), cigar_opt)| {
+                match (ref_opt, query_opt, cigar_opt) {
+                    (Some(ref_seq), Some(query_seq), Some(cigar)) => {
+                        expand_cigar_alignment(ref_seq, query_seq, cigar)
+                            .map(|(aligned_ref, _)| aligned_ref)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    };
+
+    Ok(results.into_series())
+}
+
+/// Polars expression: Expand CIGAR to produce aligned query string
+///
+/// Takes 3 inputs:
+/// - inputs[0]: reference sequence (scalar or column)
+/// - inputs[1]: query sequence column
+/// - inputs[2]: CIGAR string column
+///
+/// Returns: aligned query string with dashes where reference has deletions
+#[polars_expr(output_type=String)]
+fn cigar_aligned_query_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ref_ca: &StringChunked = inputs[0].str()?;
+    let query_ca: &StringChunked = inputs[1].str()?;
+    let cigar_ca: &StringChunked = inputs[2].str()?;
+
+    // Handle scalar reference (broadcast single value to all rows)
+    let is_scalar_ref = ref_ca.len() == 1 && query_ca.len() > 1;
+    let scalar_ref = if is_scalar_ref {
+        ref_ca.get(0)
+    } else {
+        None
+    };
+
+    let results: StringChunked = if is_scalar_ref {
+        // Broadcast scalar reference to all rows
+        query_ca
+            .into_iter()
+            .zip(cigar_ca.into_iter())
+            .map(|(query_opt, cigar_opt)| {
+                match (scalar_ref, query_opt, cigar_opt) {
+                    (Some(ref_seq), Some(query_seq), Some(cigar)) => {
+                        expand_cigar_alignment(ref_seq, query_seq, cigar)
+                            .map(|(_, aligned_query)| aligned_query)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    } else {
+        // All inputs are columns of same length
+        ref_ca
+            .into_iter()
+            .zip(query_ca.into_iter())
+            .zip(cigar_ca.into_iter())
+            .map(|((ref_opt, query_opt), cigar_opt)| {
+                match (ref_opt, query_opt, cigar_opt) {
+                    (Some(ref_seq), Some(query_seq), Some(cigar)) => {
+                        expand_cigar_alignment(ref_seq, query_seq, cigar)
+                            .map(|(_, aligned_query)| aligned_query)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    };
+
+    Ok(results.into_series())
+}
+
+// ============================================================================
 // Original CIGAR parsing (indel positions only, no sequences)
 // ============================================================================
 

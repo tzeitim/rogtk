@@ -17,6 +17,7 @@ try:
         fracture_fasta,
         fracture_sequences,
         bam_to_parquet,
+        bams_to_parquet,
         bam_to_arrow_ipc,
         bam_to_arrow_ipc_parallel,
         bam_to_arrow_ipc_gzp_parallel,
@@ -41,6 +42,7 @@ except ImportError:
         fracture_fasta,
         fracture_sequences,
         bam_to_parquet,
+        bams_to_parquet,
         bam_to_arrow_ipc,
         bam_to_arrow_ipc_parallel,
         bam_to_arrow_ipc_gzp_parallel,
@@ -573,6 +575,84 @@ class CigarNamespace:
             plugin_path=Path(__file__).parent,
             function_name="enrich_allele_insertions_expr",
             args=[self._expr, seq_col, cigar_col],
+            is_elementwise=True,
+        )
+
+    def align_to_ref(self, query_col: IntoExpr, cigar_col: IntoExpr) -> pl.Expr:
+        """Expand CIGAR to show aligned reference with dashes for insertions.
+
+        Takes a reference sequence (from self._expr), query sequence, and CIGAR string,
+        and produces an aligned reference string where:
+        - Matched bases appear uppercase
+        - Insertions (bases in query not in ref) are shown as dashes '-'
+        - Deletions consume reference bases normally
+
+        Parameters
+        ----------
+        query_col : IntoExpr
+            Column containing the query/read sequence
+        cigar_col : IntoExpr
+            Column containing the CIGAR string
+
+        Returns
+        -------
+        pl.Expr
+            Aligned reference string with dashes where query has insertions
+
+        Examples
+        --------
+        >>> # With a literal reference
+        >>> df.with_columns(
+        ...     pl.lit(ref_seq).cigar.align_to_ref(pl.col('Seq'), pl.col('CIGAR')).alias('aligned_ref')
+        ... )
+
+        >>> # Compare aligned strings visually:
+        >>> # aligned_ref:   ATCG----TACG
+        >>> # aligned_query: ATCGACTGTACG
+        """
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="cigar_aligned_ref_expr",
+            args=[self._expr, query_col, cigar_col],
+            is_elementwise=True,
+        )
+
+    def align_to_query(self, query_col: IntoExpr, cigar_col: IntoExpr) -> pl.Expr:
+        """Expand CIGAR to show aligned query with dashes for deletions.
+
+        Takes a reference sequence (from self._expr), query sequence, and CIGAR string,
+        and produces an aligned query string where:
+        - Matched bases appear uppercase
+        - Deletions (bases in ref not in query) are shown as dashes '-'
+        - Soft-clipped bases appear as lowercase (to distinguish from aligned bases)
+
+        Parameters
+        ----------
+        query_col : IntoExpr
+            Column containing the query/read sequence
+        cigar_col : IntoExpr
+            Column containing the CIGAR string
+
+        Returns
+        -------
+        pl.Expr
+            Aligned query string with dashes where reference has deletions
+
+        Examples
+        --------
+        >>> # With a literal reference
+        >>> df.with_columns(
+        ...     pl.lit(ref_seq).cigar.align_to_query(pl.col('Seq'), pl.col('CIGAR')).alias('aligned_query')
+        ... )
+
+        >>> # Soft-clipped bases appear lowercase:
+        >>> # aligned_ref:   ----ATCGTACG
+        >>> # aligned_query: atcgATCGTACG  (first 4 bases were soft-clipped)
+        """
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="cigar_aligned_query_expr",
+            args=[self._expr, query_col, cigar_col],
             is_elementwise=True,
         )
 
