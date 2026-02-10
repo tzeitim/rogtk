@@ -120,26 +120,28 @@ jobs:
           path: dist
   release:
     name: Release
-    if: "startsWith(github.ref, 'refs/tags/')"
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [linux, windows, macos, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4  
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: wheels-*  # Download all wheel artifacts
-          merge-multiple: true  # Merge them into one directory
+          pattern: wheels-*
+          merge-multiple: true
           path: dist
-      # Add this step to verify the contents
       - name: List dist contents
         run: ls -la dist/
+      # Use official PyPA action for publishing (maturin upload is deprecated)
+      # See: https://github.com/PyO3/maturin/issues/2334
       - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
-        with:
-          command: upload
-          # Specify the path to the wheels
-          args: --skip-existing dist/*
+        uses: pypa/gh-action-pypi-publish@release/v1
+      # OLD: maturin upload (deprecated, will be removed in future maturin versions)
+      # - name: Publish to PyPI
+      #   uses: PyO3/maturin-action@v1
+      #   with:
+      #     command: upload
+      #     args: --skip-existing dist/*
