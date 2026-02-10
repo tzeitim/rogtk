@@ -33,7 +33,7 @@ mod umi_score;
 
 use crate::single_fastq::{fastq_to_parquet};
 use crate::fracture::{fracture_fasta, fracture_sequences};
-use crate::bam::{bam_to_parquet, bam_to_arrow_ipc, bam_to_arrow_ipc_parallel, bam_to_arrow_ipc_gzp_parallel};
+use crate::bam::{bam_to_parquet, bams_to_parquet, bam_to_arrow_ipc, bam_to_arrow_ipc_parallel, bam_to_arrow_ipc_gzp_parallel};
 #[cfg(feature = "htslib")]
 use crate::bam::{bam_to_arrow_ipc_htslib_parallel, bam_to_arrow_ipc_htslib_multi_reader_parallel, bam_to_arrow_ipc_htslib_optimized, bam_to_arrow_ipc_htslib_mmap_parallel};
 #[cfg(feature = "htslib")]
@@ -487,6 +487,7 @@ fn rogtk(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fracture_fasta, m)?)?;
     m.add_function(wrap_pyfunction!(fracture_sequences, m)?)?;
     m.add_function(wrap_pyfunction!(bam_to_parquet, m)?)?;
+    m.add_function(wrap_pyfunction!(bams_to_parquet, m)?)?;
     m.add_function(wrap_pyfunction!(bam_to_arrow_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(bam_to_arrow_ipc_parallel, m)?)?;
     m.add_function(wrap_pyfunction!(bam_to_arrow_ipc_gzp_parallel, m)?)?;

@@ -17,6 +17,7 @@ try:
         fracture_fasta,
         fracture_sequences,
         bam_to_parquet,
+        bams_to_parquet,
         bam_to_arrow_ipc,
         bam_to_arrow_ipc_parallel,
         bam_to_arrow_ipc_gzp_parallel,
@@ -41,6 +42,7 @@ except ImportError:
         fracture_fasta,
         fracture_sequences,
         bam_to_parquet,
+        bams_to_parquet,
         bam_to_arrow_ipc,
         bam_to_arrow_ipc_parallel,
         bam_to_arrow_ipc_gzp_parallel,
@@ -145,6 +147,84 @@ def assemble_sequences(
             "min_length": min_length,
             "export_graphs": export_graphs,
             "only_largest": only_largest,
+            "auto_k": auto_k,
+            "prefix": prefix
+        },
+        returns_scalar=True,
+        is_elementwise=False,
+    )
+
+def assemble_sequences_with_anchors(
+    expr: IntoExpr,
+    start_anchor_col: IntoExpr,
+    end_anchor_col: IntoExpr,
+    k: int = 17,
+    min_coverage: int = 25,
+    method: str = 'shortest_path',
+    min_length: int | None = None,
+    export_graphs: bool = False,
+    auto_k: bool = False,
+    prefix: str | None = None
+) -> pl.Expr:
+    """
+    Assemble DNA sequences with dynamic per-group anchor sequences from columns.
+
+    This function enables single group_by assembly operations where each group
+    can have different start/end anchors, avoiding slow Python loops over segment types.
+
+    Parameters
+    ----------
+    expr : IntoExpr
+        Input expression containing DNA sequences to assemble
+    start_anchor_col : IntoExpr
+        Column expression containing start anchor sequences (first value per group used)
+    end_anchor_col : IntoExpr
+        Column expression containing end anchor sequences (first value per group used)
+    k : int, default 17
+        K-mer size for graph construction
+    min_coverage : int, default 25
+        Minimum k-mer coverage threshold
+    method : str, default 'shortest_path'
+        Assembly method (only 'shortest_path' supported with dynamic anchors)
+    min_length : int, optional
+        Minimum contig length to return
+    export_graphs : bool, default False
+        Whether to export graph visualization files
+    auto_k : bool, default False
+        Whether to automatically adjust k-mer size
+    prefix : str, optional
+        Prefix for output files when export_graphs is True
+
+    Returns
+    -------
+    pl.Expr
+        Expression returning assembled consensus sequence(s)
+
+    Examples
+    --------
+    >>> segments.group_by(['umi', 'start_meta', 'end_meta']).agg(
+    ...     rogtk.assemble_sequences_with_anchors(
+    ...         expr=pl.col('segment_seq'),
+    ...         start_anchor_col=pl.first('start_meta_seq'),
+    ...         end_anchor_col=pl.first('end_meta_seq'),
+    ...         k=15,
+    ...         min_coverage=20,
+    ...     ).alias('consensus_seq')
+    ... )
+    """
+    return register_plugin_function(
+        plugin_path=Path(__file__).parent,
+        function_name="assemble_sequences_with_anchors_expr",
+        args=[expr, start_anchor_col, end_anchor_col],
+        kwargs={
+            "k": k,
+            "min_coverage": min_coverage,
+            "method": method,
+            "start_anchor": None,  # Not used - anchors come from columns
+            "end_anchor": None,    # Not used - anchors come from columns
+            "min_length": min_length,
+            "export_graphs": export_graphs,
+            "only_largest": False,
             "auto_k": auto_k,
             "prefix": prefix
         },
@@ -412,26 +492,26 @@ class UmiNamespace:
 def umi_complexity_scores(expr: IntoExpr) -> pl.Expr:
     """
     Calculate all UMI complexity scores and return them as separate columns.
-    
+
     This function returns a struct containing:
     - shannon_entropy: Shannon entropy of nucleotide frequencies
-    - linguistic_complexity: Ratio of unique k-mers to total possible k-mers  
+    - linguistic_complexity: Ratio of unique k-mers to total possible k-mers
     - homopolymer_fraction: Fraction of sequence in homopolymer runs (3+ bases)
     - dinucleotide_entropy: Entropy of dinucleotide frequencies
     - longest_homopolymer_run: Length of longest homopolymer run
     - dust_score: DUST score for low-complexity detection
     - combined_score: Weighted combination of all metrics
-    
+
     Parameters
     ----------
     expr : IntoExpr
         Input expression containing UMI sequences
-        
+
     Returns
     -------
     pl.Expr
         Struct expression with all complexity scores
-        
+
     Examples
     --------
     >>> df.with_columns(umi_complexity_scores(pl.col("umi")))
@@ -441,5 +521,176 @@ def umi_complexity_scores(expr: IntoExpr) -> pl.Expr:
         plugin_path=Path(__file__).parent,
         function_name="umi_complexity_all_expr",
         args=expr,
+        is_elementwise=True,
+    )
+
+
+@pl.api.register_expr_namespace("cigar")
+class CigarNamespace:
+    """Namespace for CIGAR string operations on Polars expressions."""
+
+    def __init__(self, expr: pl.Expr):
+        self._expr = expr
+
+    def enrich_insertions(self, seq_col: IntoExpr, cigar_col: IntoExpr) -> pl.Expr:
+        """Enrich allele strings with actual insertion sequences from CIGAR.
+
+        Transforms [pos:NI] notation to [pos:NI:SEQUENCE] by extracting
+        the actual inserted bases from the aligned sequence using the CIGAR string.
+
+        Parameters
+        ----------
+        seq_col : IntoExpr
+            Column containing the aligned sequence (e.g., 'Seq')
+        cigar_col : IntoExpr
+            Column containing the CIGAR string
+
+        Returns
+        -------
+        pl.Expr
+            Enriched allele string with insertion sequences
+
+        Examples
+        --------
+        >>> # Enrich a single allele column
+        >>> df.with_columns(
+        ...     pl.col('r1').cigar.enrich_insertions(pl.col('Seq'), pl.col('CIGAR'))
+        ... )
+
+        >>> # Enrich multiple allele columns (r1-r15)
+        >>> df.with_columns([
+        ...     pl.col(f'r{i}').cigar.enrich_insertions(pl.col('Seq'), pl.col('CIGAR')).alias(f'r{i}')
+        ...     for i in range(1, 16)
+        ... ])
+
+        Notes
+        -----
+        Input allele format: "TAGTCATTAC[78:5I]ACTTAGACAGGTG"
+        Output format: "TAGTCATTAC[78:5I:GCTAG]ACTTAGACAGGTG"
+
+        The CIGAR string is parsed to locate insertion positions and extract
+        the actual inserted bases from the sequence column.
+        """
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="enrich_allele_insertions_expr",
+            args=[self._expr, seq_col, cigar_col],
+            is_elementwise=True,
+        )
+
+    def align_to_ref(self, query_col: IntoExpr, cigar_col: IntoExpr) -> pl.Expr:
+        """Expand CIGAR to show aligned reference with dashes for insertions.
+
+        Takes a reference sequence (from self._expr), query sequence, and CIGAR string,
+        and produces an aligned reference string where:
+        - Matched bases appear uppercase
+        - Insertions (bases in query not in ref) are shown as dashes '-'
+        - Deletions consume reference bases normally
+
+        Parameters
+        ----------
+        query_col : IntoExpr
+            Column containing the query/read sequence
+        cigar_col : IntoExpr
+            Column containing the CIGAR string
+
+        Returns
+        -------
+        pl.Expr
+            Aligned reference string with dashes where query has insertions
+
+        Examples
+        --------
+        >>> # With a literal reference
+        >>> df.with_columns(
+        ...     pl.lit(ref_seq).cigar.align_to_ref(pl.col('Seq'), pl.col('CIGAR')).alias('aligned_ref')
+        ... )
+
+        >>> # Compare aligned strings visually:
+        >>> # aligned_ref:   ATCG----TACG
+        >>> # aligned_query: ATCGACTGTACG
+        """
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="cigar_aligned_ref_expr",
+            args=[self._expr, query_col, cigar_col],
+            is_elementwise=True,
+        )
+
+    def align_to_query(self, query_col: IntoExpr, cigar_col: IntoExpr) -> pl.Expr:
+        """Expand CIGAR to show aligned query with dashes for deletions.
+
+        Takes a reference sequence (from self._expr), query sequence, and CIGAR string,
+        and produces an aligned query string where:
+        - Matched bases appear uppercase
+        - Deletions (bases in ref not in query) are shown as dashes '-'
+        - Soft-clipped bases appear as lowercase (to distinguish from aligned bases)
+
+        Parameters
+        ----------
+        query_col : IntoExpr
+            Column containing the query/read sequence
+        cigar_col : IntoExpr
+            Column containing the CIGAR string
+
+        Returns
+        -------
+        pl.Expr
+            Aligned query string with dashes where reference has deletions
+
+        Examples
+        --------
+        >>> # With a literal reference
+        >>> df.with_columns(
+        ...     pl.lit(ref_seq).cigar.align_to_query(pl.col('Seq'), pl.col('CIGAR')).alias('aligned_query')
+        ... )
+
+        >>> # Soft-clipped bases appear lowercase:
+        >>> # aligned_ref:   ----ATCGTACG
+        >>> # aligned_query: atcgATCGTACG  (first 4 bases were soft-clipped)
+        """
+        return register_plugin_function(
+            plugin_path=Path(__file__).parent,
+            function_name="cigar_aligned_query_expr",
+            args=[self._expr, query_col, cigar_col],
+            is_elementwise=True,
+        )
+
+
+def extract_cigar_insertions(seq_col: IntoExpr, cigar_col: IntoExpr) -> pl.Expr:
+    """Extract all insertions from CIGAR alignment as position:sequence pairs.
+
+    Parses CIGAR strings to find all insertion operations and extracts the
+    actual inserted bases from the corresponding sequence.
+
+    Parameters
+    ----------
+    seq_col : IntoExpr
+        Column containing the aligned sequence
+    cigar_col : IntoExpr
+        Column containing the CIGAR string
+
+    Returns
+    -------
+    pl.Expr
+        String in format "pos1:seq1|pos2:seq2|..." where each pair represents
+        an insertion at a reference position with its actual sequence.
+        Empty string if no insertions found.
+
+    Examples
+    --------
+    >>> df.with_columns(
+    ...     rogtk.extract_cigar_insertions(pl.col('Seq'), pl.col('CIGAR')).alias('insertions')
+    ... )
+
+    >>> # Filter to rows with insertions
+    >>> df.filter(
+    ...     rogtk.extract_cigar_insertions(pl.col('Seq'), pl.col('CIGAR')).str.len_chars() > 0
+    ... )
+    """
+    return register_plugin_function(
+        plugin_path=Path(__file__).parent,
+        function_name="extract_cigar_insertions_expr",
+        args=[seq_col, cigar_col],
         is_elementwise=True,
     )

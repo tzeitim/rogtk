@@ -398,7 +398,7 @@ pub fn bam_to_parquet(
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Parquet writer: {}", e)))?;
 
     let completion_msg = if limit.is_some() {
-        format!("Conversion complete: {} records (limited from potentially more) written to {}", 
+        format!("Conversion complete: {} records (limited from potentially more) written to {}",
                total_records, parquet_path)
     } else {
         format!("Conversion complete: {} records written to {}", total_records, parquet_path)
@@ -407,10 +407,244 @@ pub fn bam_to_parquet(
     Ok(())
 }
 
+/// Process multiple BAM files into a single parquet file with bounded memory.
+///
+/// This function streams batches from each BAM file sequentially, writing them
+/// to a single parquet file. Memory usage is bounded by batch_size, regardless
+/// of the total number of input files or records.
+///
+/// After writing, use `pl.scan_parquet()` for lazy operations on the result.
 #[pyfunction]
 #[pyo3(signature = (
-    bam_path, 
-    arrow_ipc_path, 
+    bam_paths,
+    parquet_path,
+    batch_size = 50000,
+    include_sequence = true,
+    include_quality = true,
+    compression = "snappy",
+    limit = None,
+    include_source_file = false
+))]
+pub fn bams_to_parquet(
+    bam_paths: Vec<String>,
+    parquet_path: &str,
+    batch_size: usize,
+    include_sequence: bool,
+    include_quality: bool,
+    compression: &str,
+    limit: Option<usize>,
+    include_source_file: bool,
+) -> PyResult<()> {
+    if bam_paths.is_empty() {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "No BAM files provided"
+        ));
+    }
+
+    if batch_size == 0 {
+        return Err(PyErr::new::<PyRuntimeError, _>(
+            "batch_size must be greater than 0"
+        ));
+    }
+
+    // Validate all input files exist
+    for bam_path in &bam_paths {
+        let input_path = Path::new(bam_path);
+        if !input_path.exists() {
+            return Err(PyErr::new::<PyRuntimeError, _>(
+                format!("BAM file does not exist: {}", bam_path)
+            ));
+        }
+    }
+
+    let output_path = Path::new(parquet_path);
+    let effective_batch_size = batch_size.min(1000000);
+
+    // Create output directory if needed
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| PyErr::new::<PyRuntimeError, _>(
+                    format!("Failed to create output directory: {}", e)
+                ))?;
+        }
+    }
+
+    // Create schema (with optional source_file column)
+    let schema = create_bam_schema_with_source(include_sequence, include_quality, include_source_file);
+
+    let writer_props = WriterProperties::builder()
+        .set_compression(parse_compression(compression))
+        .set_encoding(Encoding::PLAIN)
+        .build();
+
+    let output_file = File::create(output_path)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create output file '{}': {}", parquet_path, e)))?;
+
+    let mut parquet_writer = ArrowWriter::try_new(output_file, schema.clone(), Some(writer_props))
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to create Parquet writer: {}", e)))?;
+
+    let mut reusable_buffers = ReusableBuffers::new(effective_batch_size);
+    let mut total_records: usize = 0;
+    let mut batch_count = 0;
+    let target_records = limit.unwrap_or(usize::MAX);
+    let num_files = bam_paths.len();
+
+    eprintln!("Processing {} BAM files to {}", num_files, parquet_path);
+
+    for (file_idx, bam_path) in bam_paths.iter().enumerate() {
+        // Check if we've reached the limit
+        if total_records >= target_records {
+            eprintln!("Reached limit of {} records", target_records);
+            break;
+        }
+
+        // Extract filename for source_file column
+        let source_filename = Path::new(bam_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(bam_path)
+            .to_string();
+
+        eprintln!("[{}/{}] Processing: {}", file_idx + 1, num_files, source_filename);
+
+        let mut file = File::open(bam_path)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to open BAM file '{}': {}", bam_path, e)))?;
+
+        let mut bam_reader = bam::io::Reader::new(&mut file);
+
+        let header = bam_reader.read_header()
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to read BAM header for '{}': {}", bam_path, e)))?;
+
+        let mut file_records = 0;
+
+        loop {
+            // Check for Python interrupts periodically
+            if batch_count % 10 == 0 {
+                Python::with_gil(|py| {
+                    py.check_signals().map_err(|e| {
+                        eprintln!("Conversion interrupted by user");
+                        e
+                    })
+                })?;
+            }
+
+            let remaining_records = target_records.saturating_sub(total_records);
+            if remaining_records == 0 {
+                break;
+            }
+
+            let current_batch_size = effective_batch_size.min(remaining_records);
+
+            let batch = read_bam_batch_enhanced(
+                &mut bam_reader,
+                &header,
+                current_batch_size,
+                include_sequence,
+                include_quality,
+                &mut reusable_buffers,
+            )?;
+
+            if batch.num_rows() == 0 {
+                break;
+            }
+
+            // If source_file column is requested, add it to the batch
+            let final_batch = if include_source_file {
+                add_source_file_column(&batch, &source_filename, &schema)?
+            } else {
+                batch
+            };
+
+            parquet_writer.write(&final_batch)
+                .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to write batch {}: {}", batch_count, e)))?;
+
+            let rows_written = final_batch.num_rows();
+            total_records += rows_written;
+            file_records += rows_written;
+            batch_count += 1;
+
+            // Progress reporting every 200 batches
+            if batch_count % 200 == 0 {
+                let progress_msg = if let Some(limit_val) = limit {
+                    format!("Processed {} batches, {} / {} records ({:.1}%)",
+                           batch_count, total_records, limit_val,
+                           100.0 * total_records as f64 / limit_val as f64)
+                } else {
+                    format!("Processed {} batches, {} total records",
+                           batch_count, total_records)
+                };
+                eprintln!("Progress: {}", progress_msg);
+
+                // Force garbage collection every 400 batches
+                if batch_count % 400 == 0 {
+                    Python::with_gil(|py| {
+                        let gc = py.import_bound("gc").unwrap();
+                        let _ = gc.call_method0("collect");
+                    });
+                }
+            }
+        }
+
+        eprintln!("  -> {} records from {}", file_records, source_filename);
+        // BAM reader and file are dropped here, releasing memory
+    }
+
+    parquet_writer.close()
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to close Parquet writer: {}", e)))?;
+
+    let completion_msg = if limit.is_some() {
+        format!("Conversion complete: {} records from {} files (limited) written to {}",
+               total_records, num_files, parquet_path)
+    } else {
+        format!("Conversion complete: {} records from {} files written to {}",
+               total_records, num_files, parquet_path)
+    };
+    eprintln!("{}", completion_msg);
+    Ok(())
+}
+
+/// Create BAM schema with optional source_file column
+fn create_bam_schema_with_source(include_sequence: bool, include_quality: bool, include_source_file: bool) -> Arc<Schema> {
+    let mut fields = vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, true),
+        Field::new("start", DataType::UInt32, true),
+        Field::new("end", DataType::UInt32, true),
+        Field::new("flags", DataType::UInt32, false),
+    ];
+
+    if include_sequence {
+        fields.push(Field::new("sequence", DataType::Utf8, true));
+    }
+
+    if include_quality {
+        fields.push(Field::new("quality_scores", DataType::Utf8, true));
+    }
+
+    if include_source_file {
+        fields.push(Field::new("source_file", DataType::Utf8, false));
+    }
+
+    Arc::new(Schema::new(fields))
+}
+
+/// Add source_file column to an existing RecordBatch
+fn add_source_file_column(batch: &RecordBatch, source_filename: &str, schema: &Arc<Schema>) -> PyResult<RecordBatch> {
+    let num_rows = batch.num_rows();
+    let source_array: ArrayRef = Arc::new(StringArray::from(vec![source_filename; num_rows]));
+
+    let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+    columns.push(source_array);
+
+    RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to add source_file column: {}", e)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    bam_path,
+    arrow_ipc_path,
     batch_size = 50000,
     include_sequence = true,
     include_quality = true,

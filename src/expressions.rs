@@ -7,6 +7,443 @@ use crate::djfind::AssemblyMethod;
 use crate::umi_score::calculate_umi_complexity;
 
 use log::debug;
+use std::collections::HashMap;
+
+// ============================================================================
+// CIGAR Insertion Extraction Functions
+// ============================================================================
+
+/// Represents an insertion extracted from CIGAR alignment
+#[derive(Debug, Clone)]
+struct Insertion {
+    ref_pos: usize,
+    length: usize,
+    sequence: String,
+}
+
+/// Parse CIGAR string and extract insertions with their actual sequences from the query.
+///
+/// Returns a HashMap mapping reference position -> inserted sequence
+fn extract_insertions_from_cigar(seq: &str, cigar: &str) -> HashMap<usize, String> {
+    let mut insertions = HashMap::new();
+    let mut num_buf = String::new();
+    let mut seq_pos: usize = 0;  // position in query sequence
+    let mut ref_pos: usize = 0;  // position in reference
+
+    let seq_bytes = seq.as_bytes();
+
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num_buf.push(c);
+        } else {
+            if let Ok(len) = num_buf.parse::<usize>() {
+                match c {
+                    'M' | '=' | 'X' => {
+                        // Match/mismatch: advances both
+                        seq_pos += len;
+                        ref_pos += len;
+                    }
+                    'I' => {
+                        // Insertion: extract the actual inserted bases
+                        if seq_pos + len <= seq_bytes.len() {
+                            let inserted = String::from_utf8_lossy(
+                                &seq_bytes[seq_pos..seq_pos + len]
+                            ).to_string();
+                            insertions.insert(ref_pos, inserted);
+                        }
+                        seq_pos += len;
+                        // ref_pos doesn't advance for insertions
+                    }
+                    'D' | 'N' => {
+                        // Deletion/skip: only advances reference
+                        ref_pos += len;
+                    }
+                    'S' => {
+                        // Soft clip: only advances query
+                        seq_pos += len;
+                    }
+                    'H' | 'P' => {
+                        // Hard clip/padding: doesn't advance either
+                    }
+                    _ => {}
+                }
+            }
+            num_buf.clear();
+        }
+    }
+
+    insertions
+}
+
+/// Enrich an allele string by replacing [pos:NI] with [pos:NI:ACTG]
+///
+/// Input: "TAGTCATTAC[78:5I]ACTTAGACAGGTG"
+/// Output: "TAGTCATTAC[78:5I:GCTAG]ACTTAGACAGGTG"
+fn enrich_allele_with_insertions(
+    allele: &str,
+    insertions: &HashMap<usize, String>,
+    output: &mut String
+) {
+    let mut chars = allele.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            // Start of CIGAR notation - parse it
+            let mut bracket_content = String::new();
+            let mut found_close = false;
+
+            for inner in chars.by_ref() {
+                if inner == ']' {
+                    found_close = true;
+                    break;
+                }
+                bracket_content.push(inner);
+            }
+
+            if found_close {
+                // Parse content like "78:5I" or "20:432D" or "None"
+                if bracket_content == "None" {
+                    output.push('[');
+                    output.push_str(&bracket_content);
+                    output.push(']');
+                } else if let Some((pos_str, rest)) = bracket_content.split_once(':') {
+                    if let Ok(pos) = pos_str.parse::<usize>() {
+                        // Check if it's an insertion (ends with I)
+                        if rest.ends_with('I') {
+                            // It's an insertion - try to enrich with actual sequence
+                            // Allele notation uses 1-based positions, CIGAR uses 0-based
+                            // Try both pos-1 (convert to 0-based) and pos (in case already 0-based)
+                            let ins_seq = if pos > 0 {
+                                insertions.get(&(pos - 1)).or_else(|| insertions.get(&pos))
+                            } else {
+                                insertions.get(&pos)
+                            };
+                            if let Some(seq) = ins_seq {
+                                output.push('[');
+                                output.push_str(&bracket_content);
+                                output.push(':');
+                                output.push_str(seq);
+                                output.push(']');
+                            } else {
+                                // No insertion found at this position, keep original
+                                output.push('[');
+                                output.push_str(&bracket_content);
+                                output.push(']');
+                            }
+                        } else {
+                            // Not an insertion (deletion, etc.) - keep as-is
+                            output.push('[');
+                            output.push_str(&bracket_content);
+                            output.push(']');
+                        }
+                    } else {
+                        // Couldn't parse position - keep original
+                        output.push('[');
+                        output.push_str(&bracket_content);
+                        output.push(']');
+                    }
+                } else {
+                    // Invalid format - keep original
+                    output.push('[');
+                    output.push_str(&bracket_content);
+                    output.push(']');
+                }
+            } else {
+                // No closing bracket found - just output what we have
+                output.push('[');
+                output.push_str(&bracket_content);
+            }
+        } else {
+            output.push(c);
+        }
+    }
+}
+
+/// Polars expression: Enrich allele strings with actual insertion sequences
+///
+/// Takes 3 inputs:
+/// - inputs[0]: allele string column (e.g., "TAGTCATTAC[78:5I]ACTTAGACAGGTG")
+/// - inputs[1]: sequence column (the full aligned sequence)
+/// - inputs[2]: CIGAR string column
+///
+/// Returns: enriched allele string with insertion sequences
+#[polars_expr(output_type=String)]
+fn enrich_allele_insertions_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let allele_ca: &StringChunked = inputs[0].str()?;
+    let seq_ca: &StringChunked = inputs[1].str()?;
+    let cigar_ca: &StringChunked = inputs[2].str()?;
+
+    // Process each row
+    let results: StringChunked = allele_ca
+        .into_iter()
+        .zip(seq_ca.into_iter())
+        .zip(cigar_ca.into_iter())
+        .map(|((allele_opt, seq_opt), cigar_opt)| {
+            match (allele_opt, seq_opt, cigar_opt) {
+                (Some(allele), Some(seq), Some(cigar)) => {
+                    let insertions = extract_insertions_from_cigar(seq, cigar);
+                    let mut output = String::with_capacity(allele.len() + 50);
+                    enrich_allele_with_insertions(allele, &insertions, &mut output);
+                    Some(output)
+                }
+                (Some(allele), _, _) => Some(allele.to_string()), // Return original if missing seq/cigar
+                _ => None,
+            }
+        })
+        .collect();
+
+    Ok(results.into_series())
+}
+
+/// Polars expression: Extract all insertions from CIGAR as a string map
+///
+/// Takes 2 inputs:
+/// - inputs[0]: sequence column
+/// - inputs[1]: CIGAR string column
+///
+/// Returns: String in format "pos1:seq1|pos2:seq2|..."
+#[polars_expr(output_type=String)]
+fn extract_cigar_insertions_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let seq_ca: &StringChunked = inputs[0].str()?;
+    let cigar_ca: &StringChunked = inputs[1].str()?;
+
+    let results: StringChunked = seq_ca
+        .into_iter()
+        .zip(cigar_ca.into_iter())
+        .map(|(seq_opt, cigar_opt)| {
+            match (seq_opt, cigar_opt) {
+                (Some(seq), Some(cigar)) => {
+                    let insertions = extract_insertions_from_cigar(seq, cigar);
+                    if insertions.is_empty() {
+                        Some(String::new())
+                    } else {
+                        let mut pairs: Vec<_> = insertions.into_iter().collect();
+                        pairs.sort_by_key(|(pos, _)| *pos);
+                        let result = pairs
+                            .into_iter()
+                            .map(|(pos, seq)| format!("{}:{}", pos, seq))
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        Some(result)
+                    }
+                }
+                _ => None,
+            }
+        })
+        .collect();
+
+    Ok(results.into_series())
+}
+
+// ============================================================================
+// CIGAR Alignment Expansion Functions
+// ============================================================================
+
+/// Expand CIGAR into aligned reference and query strings with dashes for gaps.
+///
+/// Returns (aligned_ref, aligned_query) where:
+/// - aligned_ref has dashes where the query has insertions
+/// - aligned_query has dashes where the reference has deletions
+/// - Soft-clipped bases appear as lowercase in the query
+///
+/// CIGAR operations:
+/// - M/=/X: match/mismatch - consume both ref and query (uppercase)
+/// - I: insertion - add dashes to ref, consume query (uppercase)
+/// - D/N: deletion/skip - consume ref, add dashes to query
+/// - S: soft clip - add dashes to ref, consume query as LOWERCASE
+/// - H: hard clip - skip (bases not in query sequence)
+fn expand_cigar_alignment(ref_seq: &str, query_seq: &str, cigar: &str) -> Option<(String, String)> {
+    let ref_bytes = ref_seq.as_bytes();
+    let query_bytes = query_seq.as_bytes();
+
+    let mut aligned_ref = String::with_capacity(ref_seq.len() + query_seq.len());
+    let mut aligned_query = String::with_capacity(ref_seq.len() + query_seq.len());
+
+    let mut ref_pos: usize = 0;
+    let mut query_pos: usize = 0;
+    let mut num_buf = String::new();
+
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num_buf.push(c);
+        } else {
+            if let Ok(len) = num_buf.parse::<usize>() {
+                match c {
+                    'M' | '=' | 'X' => {
+                        // Match/mismatch: consume both ref and query (uppercase)
+                        for _ in 0..len {
+                            if ref_pos < ref_bytes.len() {
+                                aligned_ref.push((ref_bytes[ref_pos] as char).to_ascii_uppercase());
+                                ref_pos += 1;
+                            }
+                            if query_pos < query_bytes.len() {
+                                aligned_query.push((query_bytes[query_pos] as char).to_ascii_uppercase());
+                                query_pos += 1;
+                            }
+                        }
+                    }
+                    'I' => {
+                        // Insertion: add dashes to ref, consume query (uppercase)
+                        for _ in 0..len {
+                            aligned_ref.push('-');
+                            if query_pos < query_bytes.len() {
+                                aligned_query.push((query_bytes[query_pos] as char).to_ascii_uppercase());
+                                query_pos += 1;
+                            }
+                        }
+                    }
+                    'D' | 'N' => {
+                        // Deletion/skip: consume ref, add dashes to query
+                        for _ in 0..len {
+                            if ref_pos < ref_bytes.len() {
+                                aligned_ref.push((ref_bytes[ref_pos] as char).to_ascii_uppercase());
+                                ref_pos += 1;
+                            }
+                            aligned_query.push('-');
+                        }
+                    }
+                    'S' => {
+                        // Soft clip: add dashes to ref, consume query as LOWERCASE
+                        for _ in 0..len {
+                            aligned_ref.push('-');
+                            if query_pos < query_bytes.len() {
+                                aligned_query.push((query_bytes[query_pos] as char).to_ascii_lowercase());
+                                query_pos += 1;
+                            }
+                        }
+                    }
+                    'H' | 'P' => {
+                        // Hard clip/padding: bases not in query, skip
+                    }
+                    _ => {}
+                }
+            }
+            num_buf.clear();
+        }
+    }
+
+    Some((aligned_ref, aligned_query))
+}
+
+/// Polars expression: Expand CIGAR to produce aligned reference string
+///
+/// Takes 3 inputs:
+/// - inputs[0]: reference sequence (scalar or column)
+/// - inputs[1]: query sequence column
+/// - inputs[2]: CIGAR string column
+///
+/// Returns: aligned reference string with dashes where query has insertions
+#[polars_expr(output_type=String)]
+fn cigar_aligned_ref_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ref_ca: &StringChunked = inputs[0].str()?;
+    let query_ca: &StringChunked = inputs[1].str()?;
+    let cigar_ca: &StringChunked = inputs[2].str()?;
+
+    // Handle scalar reference (broadcast single value to all rows)
+    let is_scalar_ref = ref_ca.len() == 1 && query_ca.len() > 1;
+    let scalar_ref = if is_scalar_ref {
+        ref_ca.get(0)
+    } else {
+        None
+    };
+
+    let results: StringChunked = if is_scalar_ref {
+        // Broadcast scalar reference to all rows
+        query_ca
+            .into_iter()
+            .zip(cigar_ca.into_iter())
+            .map(|(query_opt, cigar_opt)| {
+                match (scalar_ref, query_opt, cigar_opt) {
+                    (Some(ref_seq), Some(query_seq), Some(cigar)) => {
+                        expand_cigar_alignment(ref_seq, query_seq, cigar)
+                            .map(|(aligned_ref, _)| aligned_ref)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    } else {
+        // All inputs are columns of same length
+        ref_ca
+            .into_iter()
+            .zip(query_ca.into_iter())
+            .zip(cigar_ca.into_iter())
+            .map(|((ref_opt, query_opt), cigar_opt)| {
+                match (ref_opt, query_opt, cigar_opt) {
+                    (Some(ref_seq), Some(query_seq), Some(cigar)) => {
+                        expand_cigar_alignment(ref_seq, query_seq, cigar)
+                            .map(|(aligned_ref, _)| aligned_ref)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    };
+
+    Ok(results.into_series())
+}
+
+/// Polars expression: Expand CIGAR to produce aligned query string
+///
+/// Takes 3 inputs:
+/// - inputs[0]: reference sequence (scalar or column)
+/// - inputs[1]: query sequence column
+/// - inputs[2]: CIGAR string column
+///
+/// Returns: aligned query string with dashes where reference has deletions
+#[polars_expr(output_type=String)]
+fn cigar_aligned_query_expr(inputs: &[Series]) -> PolarsResult<Series> {
+    let ref_ca: &StringChunked = inputs[0].str()?;
+    let query_ca: &StringChunked = inputs[1].str()?;
+    let cigar_ca: &StringChunked = inputs[2].str()?;
+
+    // Handle scalar reference (broadcast single value to all rows)
+    let is_scalar_ref = ref_ca.len() == 1 && query_ca.len() > 1;
+    let scalar_ref = if is_scalar_ref {
+        ref_ca.get(0)
+    } else {
+        None
+    };
+
+    let results: StringChunked = if is_scalar_ref {
+        // Broadcast scalar reference to all rows
+        query_ca
+            .into_iter()
+            .zip(cigar_ca.into_iter())
+            .map(|(query_opt, cigar_opt)| {
+                match (scalar_ref, query_opt, cigar_opt) {
+                    (Some(ref_seq), Some(query_seq), Some(cigar)) => {
+                        expand_cigar_alignment(ref_seq, query_seq, cigar)
+                            .map(|(_, aligned_query)| aligned_query)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    } else {
+        // All inputs are columns of same length
+        ref_ca
+            .into_iter()
+            .zip(query_ca.into_iter())
+            .zip(cigar_ca.into_iter())
+            .map(|((ref_opt, query_opt), cigar_opt)| {
+                match (ref_opt, query_opt, cigar_opt) {
+                    (Some(ref_seq), Some(query_seq), Some(cigar)) => {
+                        expand_cigar_alignment(ref_seq, query_seq, cigar)
+                            .map(|(_, aligned_query)| aligned_query)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    };
+
+    Ok(results.into_series())
+}
+
+// ============================================================================
+// Original CIGAR parsing (indel positions only, no sequences)
+// ============================================================================
 
 fn parse_cigar_str(cigar: &str, output: &mut String, block_dels: bool) {
     let mut num_buf = String::new();
@@ -301,6 +738,93 @@ fn assemble_sequences_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsR
         .collect();
     
     // Call assembly function with only_largest always set to true
+    let contigs = assemble_sequences(
+        sequences,
+        kwargs.k,
+        kwargs.min_coverage,
+        method,
+        kwargs.export_graphs,
+        Some(true), // Hardcoded to true
+        kwargs.min_length,
+        kwargs.auto_k,
+        kwargs.prefix,
+    ).map_err(|e| PolarsError::ComputeError(
+        format!("Assembly failed: {}", e).into()
+    ))?;
+
+    let result = contigs.join("\n");
+    Ok(StringChunked::from_slice(
+        PlSmallStr::from_str("assembled_sequences"),
+        &[result.as_str()]
+    ).into_series())
+}
+
+/// Assembly expression that takes anchor sequences from input columns instead of kwargs.
+/// This enables per-group dynamic anchors in group_by operations.
+///
+/// inputs[0] = sequences (String column)
+/// inputs[1] = start_anchor (String column - first value used)
+/// inputs[2] = end_anchor (String column - first value used)
+#[polars_expr(output_type_func=output_string_type)]
+fn assemble_sequences_with_anchors_expr(inputs: &[Series], kwargs: AssemblyKwargs) -> PolarsResult<Series> {
+    debug!("Received kwargs for dynamic anchors: {:?}", kwargs);
+
+    // Validate we have at least 3 inputs
+    if inputs.len() < 3 {
+        return Err(PolarsError::ComputeError(
+            "assemble_sequences_with_anchors requires 3 inputs: sequences, start_anchor, end_anchor".into()
+        ));
+    }
+
+    // Extract anchor strings from the first row of each anchor column
+    let start_anchor_series = inputs[1].str()?;
+    let end_anchor_series = inputs[2].str()?;
+
+    let start_anchor = start_anchor_series.get(0)
+        .ok_or_else(|| PolarsError::ComputeError(
+            "start_anchor column is empty".into()
+        ))?
+        .to_string();
+
+    let end_anchor = end_anchor_series.get(0)
+        .ok_or_else(|| PolarsError::ComputeError(
+            "end_anchor column is empty".into()
+        ))?
+        .to_string();
+
+    debug!("Dynamic anchors - start: {}, end: {}", start_anchor, end_anchor);
+
+    // Build assembly method - for dynamic anchors, we only support shortest_path
+    let method = match kwargs.method.as_str() {
+        "compression" => {
+            return Err(PolarsError::ComputeError(
+                "compression method is not supported with dynamic anchors; use shortest_path".into()
+            ));
+        },
+        "shortest_path" => AssemblyMethod::ShortestPath {
+            start_anchor: start_anchor.clone(),
+            end_anchor: end_anchor.clone(),
+        },
+        "shortest_path_auto" => {
+            return Err(PolarsError::ComputeError(
+                "shortest_path_auto method is not supported with dynamic anchors; use shortest_path".into()
+            ));
+        },
+        _ => return Err(PolarsError::ComputeError(
+            "Invalid assembly method for dynamic anchors. Must be 'shortest_path'".into()
+        )),
+    };
+
+    // Extract sequences from input series
+    let ca = inputs[0].str()?;
+
+    // Convert string chunk to Vec<String>
+    let sequences: Vec<String> = ca.into_iter()
+        .flatten()
+        .map(|s| s.to_string())
+        .collect();
+
+    // Call assembly function
     let contigs = assemble_sequences(
         sequences,
         kwargs.k,
