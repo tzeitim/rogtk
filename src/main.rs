@@ -1,4 +1,4 @@
-use clap::{Command, Arg, ArgMatches};
+use clap::{Command, Arg};
 
 mod parallel_toy;
 mod parallel_toy_ipc;

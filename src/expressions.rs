@@ -14,6 +14,8 @@ use std::collections::HashMap;
 // ============================================================================
 
 /// Represents an insertion extracted from CIGAR alignment
+/// Note: Currently unused but kept for potential future use in CIGAR analysis
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Insertion {
     ref_pos: usize,

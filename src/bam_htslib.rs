@@ -1,27 +1,43 @@
-use pyo3::prelude::*;
-use pyo3::exceptions::PyRuntimeError;
-use std::fs::File;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use rayon::ThreadPoolBuilder;
-use crossbeam_channel::{bounded, Receiver, Sender};
-use std::io::{Read as StdRead, Seek, SeekFrom};
-use std::collections::VecDeque;
+// Imports only needed for create_bam_schema (always available)
+use arrow::datatypes::{DataType, Field, Schema};
 
+// Imports only needed when htslib feature is enabled
+#[cfg(feature = "htslib")]
+use pyo3::prelude::*;
+#[cfg(feature = "htslib")]
+use pyo3::exceptions::PyRuntimeError;
+#[cfg(feature = "htslib")]
+use std::fs::File;
+#[cfg(feature = "htslib")]
+use std::path::Path;
+#[cfg(feature = "htslib")]
+use std::sync::{Arc, Mutex};
+#[cfg(feature = "htslib")]
+use std::time::Instant;
+#[cfg(feature = "htslib")]
+use rayon::ThreadPoolBuilder;
+#[cfg(feature = "htslib")]
+use crossbeam_channel::{bounded, Receiver, Sender};
+#[cfg(feature = "htslib")]
+use std::io::{Read as StdRead, Seek, SeekFrom};
+#[cfg(feature = "htslib")]
+use std::collections::VecDeque;
 #[cfg(feature = "htslib")]
 use rust_htslib::bam as hts_bam;
 #[cfg(feature = "htslib")]
 use rust_htslib::bam::Read as HtsRead;
 #[cfg(feature = "htslib")]
 use rust_htslib::bam::ext::BamRecordExtensions;
-
+#[cfg(feature = "htslib")]
 use arrow::array::*;
-use arrow::datatypes::{DataType, Field, Schema};
+#[cfg(feature = "htslib")]
 use arrow::record_batch::RecordBatch;
+#[cfg(feature = "htslib")]
 use arrow::ipc::writer::FileWriter as ArrowIpcWriter;
 
 /// Creates the Arrow schema for BAM records
+/// Note: Used by htslib_hybrid modules when enabled
+#[allow(dead_code)]
 pub fn create_bam_schema(include_sequence: bool, include_quality: bool) -> Schema {
     let mut fields = vec![
         Field::new("name", DataType::Utf8, false),

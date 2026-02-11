@@ -19,20 +19,19 @@ try:
         bam_to_parquet,
         bams_to_parquet,
         bam_to_arrow_ipc,
+        bams_to_arrow_ipc,
         bam_to_arrow_ipc_parallel,
         bam_to_arrow_ipc_gzp_parallel,
         bam_to_arrow_ipc_htslib_parallel,
         bam_to_arrow_ipc_htslib_multi_reader_parallel,
         bam_to_arrow_ipc_htslib_optimized,
+        bams_to_arrow_ipc_htslib_optimized,
         bam_to_arrow_ipc_htslib_mmap_parallel,
         bam_to_arrow_ipc_htslib_bgzf_blocks,
-        bam_to_arrow_ipc_htslib_hybrid_segments,
-        bam_to_arrow_ipc_htslib_hybrid_optimized,
-        bam_to_arrow_ipc_htslib_hybrid_minimal_fix,
     )
     _HTSLIB_AVAILABLE = True
 except ImportError:
-    # Fallback: import without HTSlib function
+    # Fallback: import without HTSlib functions
     from rogtk.rogtk import (
         sum_as_string,
         oparse_cigar,
@@ -44,6 +43,7 @@ except ImportError:
         bam_to_parquet,
         bams_to_parquet,
         bam_to_arrow_ipc,
+        bams_to_arrow_ipc,
         bam_to_arrow_ipc_parallel,
         bam_to_arrow_ipc_gzp_parallel,
     )
@@ -51,6 +51,7 @@ except ImportError:
     bam_to_arrow_ipc_htslib_parallel = None
     bam_to_arrow_ipc_htslib_multi_reader_parallel = None
     bam_to_arrow_ipc_htslib_optimized = None
+    bams_to_arrow_ipc_htslib_optimized = None
     bam_to_arrow_ipc_htslib_mmap_parallel = None
 
 @pl.api.register_expr_namespace("dna")
