@@ -3,6 +3,7 @@ name = "rogtk"
 version = "0.1.23"
 authors = [
   "Pedro Olivares Chauvet <pedro.olivares@weizmann.ac.il>",
+  "Pedro Olivares Chauvet <pedro.olivares-chauvet@uni-wuerzburg.de>",
 ]
 edition = "2018"
 
