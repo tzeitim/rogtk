@@ -1,9 +1,9 @@
 [package]
 name = "rogtk"
-version = "0.1.21"
+version = "0.1.23"
 authors = [
-  "Pedro Olivares Chauvet <pedro.olivares@mdc-berlin.de>", 
-  "Pedro Olivares Chauvet <pedro.olivares@weizmann.ac.il>", 
+  "Pedro Olivares Chauvet <pedro.olivares@weizmann.ac.il>",
+  "Pedro Olivares Chauvet <pedro.olivares-chauvet@uni-wuerzburg.de>",
 ]
 edition = "2018"
 
@@ -29,7 +29,7 @@ htslib = ["rust-htslib"]
 pyo3 = { version = "0.22.2", features = ["extension-module", "abi3-py38"] }
 flate2 = "1.0"
 itertools = "0.12.0" 
-parquet = "50.0.0"
+parquet = { version = "50.0.0", features = ["zstd"] }
 arrow = "=50.0.0"
 tokio = "1.35.1"
 #polars = { version = "0.39.2", features = ["parquet", "lazy", "strings", "temporal", "random"] }
