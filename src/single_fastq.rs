@@ -11,16 +11,36 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use arrow::array::StringArray;
 use parquet::file::properties::WriterProperties;
-use parquet::basic::Compression;
+use parquet::basic::{Compression, ZstdLevel};
 
 use arrow::datatypes::{Schema, Field, DataType};
 
+// zstd-3: ~half the size of snappy at essentially snappy's write speed;
+// matches the Arrow/DuckDB default. ponytail: fixed to fastq_to_parquet,
+// apply the same default to bam_to_parquet/bams_to_parquet if that matters too.
+fn parse_compression(name: &str, level: i32) -> PyResult<Compression> {
+    match name.to_lowercase().as_str() {
+        "zstd" => ZstdLevel::try_new(level)
+            .map(Compression::ZSTD)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Invalid zstd level {}: {}", level, e))),
+        "snappy" => Ok(Compression::SNAPPY),
+        "gzip" => Ok(Compression::GZIP(Default::default())),
+        "lz4" => Ok(Compression::LZ4),
+        "uncompressed" | "none" => Ok(Compression::UNCOMPRESSED),
+        other => Err(PyErr::new::<PyRuntimeError, _>(format!(
+            "Unknown compression '{}'. Expected one of: zstd, snappy, gzip, lz4, uncompressed", other
+        ))),
+    }
+}
+
 #[pyfunction]
-#[pyo3(signature = (in_fn1, out_fn, limit=None))]
+#[pyo3(signature = (in_fn1, out_fn, limit=None, compression="zstd", compression_level=3))]
 pub fn fastq_to_parquet(
        in_fn1: String,
        out_fn: String,
        limit: Option<usize>,
+       compression: &str,
+       compression_level: i32,
        )
     -> PyResult<()> {
 
@@ -40,7 +60,7 @@ pub fn fastq_to_parquet(
     let file = File::create(out_fn)?;
     // WriterProperties can be used to set Parquet file options
     let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
+        .set_compression(parse_compression(compression, compression_level)?)
         .build();
 
     let mut writer = match ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)){
@@ -135,3 +155,16 @@ pub fn fastq_to_parquet(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_compression_covers_known_and_unknown_names() {
+        assert!(matches!(parse_compression("zstd", 3), Ok(Compression::ZSTD(_))));
+        assert!(matches!(parse_compression("snappy", 3), Ok(Compression::SNAPPY)));
+        assert!(matches!(parse_compression("uncompressed", 3), Ok(Compression::UNCOMPRESSED)));
+        assert!(parse_compression("zstd", 99).is_err(), "zstd level out of range should error");
+        assert!(parse_compression("bogus", 3).is_err(), "unknown codec name should error");
+    }
+}
