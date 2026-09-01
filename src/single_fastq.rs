@@ -73,18 +73,19 @@ pub fn fastq_to_parquet(
     };
 
 
-    let iter1: Box<dyn Iterator<Item = String>> = match limit {
-        Some(l) => Box::new(reader1.take(l)),
-        None => Box::new(reader1),
-    };
-
-    let mut read_id_buffer = Vec::new(); 
+    let mut read_id_buffer = Vec::new();
     let mut read1_seq_buffer= Vec::new();
     let mut read1_qual_buffer = Vec::new();
 
-    let mut chunk_count = 0; 
-                             
-    for chunk1 in iter1.chunks(4).into_iter(){
+    let mut chunk_count = 0;
+    let mut reads_seen = 0usize;
+
+    for chunk1 in reader1.chunks(4).into_iter(){
+        if let Some(l) = limit {
+            if reads_seen >= l {
+                break;
+            }
+        }
         let chunk1: Vec<_> = chunk1.collect();
 
         let (read_id1, seq1, _plus1, qual1) = (&chunk1[0], &chunk1[1], &chunk1[2], &chunk1[3]);
@@ -99,7 +100,8 @@ pub fn fastq_to_parquet(
         read1_qual_buffer.push(read1_qual);
 
         chunk_count += 1;
-        
+        reads_seen += 1;
+
         // against my expectations a relatively small buffer is faster than a larger (10M) one
         if chunk_count == 10_000{
 
