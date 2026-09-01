@@ -11,7 +11,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use arrow::array::StringArray;
 use parquet::file::properties::WriterProperties;
-use parquet::basic::Compression;
+use parquet::basic::{Compression, ZstdLevel};
 
 use arrow::datatypes::{Schema, Field, DataType};
 
@@ -67,15 +67,54 @@ fn reverse_complement(dna: &str) -> String {
         .collect::<String>()
 }
 
+// zstd-3: ~half the size of snappy at essentially snappy's write speed;
+// matches the Arrow/DuckDB default. Single source of truth for every
+// parquet writer in this crate - errors on an unknown name instead of
+// silently falling back, so a typo doesn't quietly ship the wrong codec.
+pub(crate) fn parse_compression(name: &str, level: i32) -> PyResult<Compression> {
+    match name.to_lowercase().as_str() {
+        "zstd" => ZstdLevel::try_new(level)
+            .map(Compression::ZSTD)
+            .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Invalid zstd level {}: {}", level, e))),
+        "snappy" => Ok(Compression::SNAPPY),
+        "gzip" => Ok(Compression::GZIP(Default::default())),
+        "lz4" => Ok(Compression::LZ4),
+        "brotli" => Ok(Compression::BROTLI(Default::default())),
+        "uncompressed" | "none" => Ok(Compression::UNCOMPRESSED),
+        other => Err(PyErr::new::<PyRuntimeError, _>(format!(
+            "Unknown compression '{}'. Expected one of: zstd, snappy, gzip, lz4, brotli, uncompressed", other
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_compression_covers_known_and_unknown_names() {
+        assert!(matches!(parse_compression("zstd", 3), Ok(Compression::ZSTD(_))));
+        assert!(matches!(parse_compression("snappy", 3), Ok(Compression::SNAPPY)));
+        assert!(matches!(parse_compression("gzip", 3), Ok(Compression::GZIP(_))));
+        assert!(matches!(parse_compression("lz4", 3), Ok(Compression::LZ4)));
+        assert!(matches!(parse_compression("brotli", 3), Ok(Compression::BROTLI(_))));
+        assert!(matches!(parse_compression("uncompressed", 3), Ok(Compression::UNCOMPRESSED)));
+        assert!(parse_compression("zstd", 99).is_err(), "zstd level out of range should error");
+        assert!(parse_compression("bogus", 3).is_err(), "unknown codec name should error, not silently fall back");
+    }
+}
+
 
 #[pyfunction]
-#[pyo3(signature = (in_fn1, in_fn2, out_fn, limit=None, do_rev_comp=None))]
+#[pyo3(signature = (in_fn1, in_fn2, out_fn, limit=None, do_rev_comp=None, compression="zstd", compression_level=3))]
 fn merge_paired_fastqs(
        in_fn1: String,
        in_fn2: String,
        out_fn: String,
        limit: Option<usize>,
        do_rev_comp: Option<bool>,
+       compression: &str,
+       compression_level: i32,
        )
     -> PyResult<()> {
 
@@ -102,7 +141,7 @@ fn merge_paired_fastqs(
     let file = File::create(out_fn)?;
     // WriterProperties can be used to set Parquet file options
     let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
+        .set_compression(parse_compression(compression, compression_level)?)
         .build();
 
     let mut writer = match ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)){
@@ -114,26 +153,21 @@ fn merge_paired_fastqs(
     }
     };
 
-
-    let iter1: Box<dyn Iterator<Item = String>> = match limit {
-        Some(l) => Box::new(reader1.take(l)),
-        None => Box::new(reader1),
-    };
-
-    let iter2: Box<dyn Iterator<Item = String>> = match limit {
-        Some(l) => Box::new(reader2.take(l)),
-        None => Box::new(reader2),
-    };
-
-    let mut read_id_buffer = Vec::new(); 
+    let mut read_id_buffer = Vec::new();
     let mut read1_seq_buffer= Vec::new();
     let mut read1_qual_buffer = Vec::new();
     let mut read2_seq_buffer= Vec::new();
     let mut read2_qual_buffer = Vec::new();
 
-    let mut chunk_count = 0; 
-                             
-    for (chunk1, chunk2) in iter1.chunks(4).into_iter().zip(iter2.chunks(4).into_iter()) {
+    let mut chunk_count = 0;
+    let mut reads_seen = 0usize;
+
+    for (chunk1, chunk2) in reader1.chunks(4).into_iter().zip(reader2.chunks(4).into_iter()) {
+        if let Some(l) = limit {
+            if reads_seen >= l {
+                break;
+            }
+        }
         let chunk1: Vec<_> = chunk1.collect();
         let chunk2: Vec<_> = chunk2.collect();
 
@@ -165,7 +199,8 @@ fn merge_paired_fastqs(
 
 
         chunk_count += 1;
-        
+        reads_seen += 1;
+
         // against my expectations a relatively small buffer is faster than a larger (10M) one
         if chunk_count == 10_000{
 
@@ -228,7 +263,7 @@ fn merge_paired_fastqs(
 }
 
 #[pyfunction]
-#[pyo3(signature = (in_fn1, in_fn2, cbc_len, umi_len, out_fn, limit=None, do_rev_comp=None))]
+#[pyo3(signature = (in_fn1, in_fn2, cbc_len, umi_len, out_fn, limit=None, do_rev_comp=None, compression="zstd", compression_level=3))]
 fn parse_paired_fastqs(
     // Parse pair of fastqs according to a given chemistry (10x in this case)
        in_fn1: String,
@@ -237,7 +272,9 @@ fn parse_paired_fastqs(
        umi_len: usize,
        out_fn: String,
        limit: Option<usize>,
-       do_rev_comp: Option<bool>)
+       do_rev_comp: Option<bool>,
+       compression: &str,
+       compression_level: i32)
     -> PyResult<()> {
 
     let do_rev_comp = do_rev_comp.unwrap_or(false);
@@ -268,7 +305,7 @@ fn parse_paired_fastqs(
     let file = File::create(out_fn)?;
     // WriterProperties can be used to set Parquet file options
     let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
+        .set_compression(parse_compression(compression, compression_level)?)
         .build();
 
     let mut writer = match ArrowWriter::try_new(file, arrow_schema.clone(), Some(props)){
@@ -280,30 +317,25 @@ fn parse_paired_fastqs(
     }
     };
 
-
-    let iter1: Box<dyn Iterator<Item = String>> = match limit {
-        Some(l) => Box::new(reader1.take(l)),
-        None => Box::new(reader1),
-    };
-
-    let iter2: Box<dyn Iterator<Item = String>> = match limit {
-        Some(l) => Box::new(reader2.take(l)),
-        None => Box::new(reader2),
-    };
-
-    let mut read_id_buffer = Vec::new(); 
-    let mut start_buffer = Vec::new(); 
+    let mut read_id_buffer = Vec::new();
+    let mut start_buffer = Vec::new();
     let mut end_buffer = Vec::new();
-    let mut cbc_str_buffer = Vec::new(); 
+    let mut cbc_str_buffer = Vec::new();
     let mut cbc_qual_buffer = Vec::new();
-    let mut umi_str_buffer = Vec::new(); 
+    let mut umi_str_buffer = Vec::new();
     let mut umi_qual_buffer = Vec::new();
     let mut read2_seq_buffer= Vec::new();
     let mut read2_qual_buffer = Vec::new();
 
-    let mut chunk_count = 0; 
-                             
-    for (chunk1, chunk2) in iter1.chunks(4).into_iter().zip(iter2.chunks(4).into_iter()) {
+    let mut chunk_count = 0;
+    let mut reads_seen = 0usize;
+
+    for (chunk1, chunk2) in reader1.chunks(4).into_iter().zip(reader2.chunks(4).into_iter()) {
+        if let Some(l) = limit {
+            if reads_seen >= l {
+                break;
+            }
+        }
         let chunk1: Vec<_> = chunk1.collect();
         let chunk2: Vec<_> = chunk2.collect();
 
@@ -342,7 +374,8 @@ fn parse_paired_fastqs(
 
 
         chunk_count += 1;
-        
+        reads_seen += 1;
+
         // Check if chunk_count reached a million or it's the last iteration
         if chunk_count == 10_000_000   {
 

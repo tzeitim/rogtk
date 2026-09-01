@@ -26,8 +26,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use arrow::ipc::writer::FileWriter as ArrowIpcWriter;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, Encoding};
+use parquet::basic::Encoding;
 use parquet::file::properties::WriterProperties;
+use crate::parse_compression;
 
 
 
@@ -263,12 +264,13 @@ fn extract_record_data_enhanced(
 // ####################
 #[pyfunction]
 #[pyo3(signature = (
-    bam_path, 
-    parquet_path, 
+    bam_path,
+    parquet_path,
     batch_size = 50000,  // Balanced default batch size for optimal memory/performance trade-off
     include_sequence = true,
     include_quality = true,
     compression = "snappy",
+    compression_level = 3,
     limit = None
 ))]
 pub fn bam_to_parquet(
@@ -278,6 +280,7 @@ pub fn bam_to_parquet(
     include_sequence: bool,
     include_quality: bool,
     compression: &str,
+    compression_level: i32,
     limit: Option<usize>,
 ) -> PyResult<()> {
     let input_path = Path::new(bam_path);
@@ -314,9 +317,9 @@ pub fn bam_to_parquet(
         .map_err(|e| PyErr::new::<PyRuntimeError, _>(format!("Failed to read BAM header: {}", e)))?;
 
     let schema = create_bam_schema(include_sequence, include_quality);
-    
+
     let writer_props = WriterProperties::builder()
-        .set_compression(parse_compression(compression))
+        .set_compression(parse_compression(compression, compression_level)?)
         .set_encoding(Encoding::PLAIN)
         .build();
 
@@ -423,6 +426,7 @@ pub fn bam_to_parquet(
     include_sequence = true,
     include_quality = true,
     compression = "snappy",
+    compression_level = 3,
     limit = None,
     include_source_file = false
 ))]
@@ -433,6 +437,7 @@ pub fn bams_to_parquet(
     include_sequence: bool,
     include_quality: bool,
     compression: &str,
+    compression_level: i32,
     limit: Option<usize>,
     include_source_file: bool,
 ) -> PyResult<()> {
@@ -475,7 +480,7 @@ pub fn bams_to_parquet(
     let schema = create_bam_schema_with_source(include_sequence, include_quality, include_source_file);
 
     let writer_props = WriterProperties::builder()
-        .set_compression(parse_compression(compression))
+        .set_compression(parse_compression(compression, compression_level)?)
         .set_encoding(Encoding::PLAIN)
         .build();
 
@@ -3282,19 +3287,4 @@ fn _future_expanded_schema() -> Arc<Schema> {
         // Field::new("mate_start", DataType::UInt32, true),
         // Field::new("template_length", DataType::Int32, true),
     ]))
-}
-
-fn parse_compression(compression: &str) -> Compression {
-    match compression.to_lowercase().as_str() {
-        "snappy" => Compression::SNAPPY,
-        "gzip" => Compression::GZIP(Default::default()),   
-        "lz4" => Compression::LZ4,
-        "brotli" => Compression::BROTLI(Default::default()), 
-        "zstd" => Compression::ZSTD(Default::default()),   
-        "uncompressed" | "none" => Compression::UNCOMPRESSED,
-        _ => {
-            eprintln!("Unknown compression '{}', defaulting to snappy", compression);
-            Compression::SNAPPY
-        }
-    }
 }
